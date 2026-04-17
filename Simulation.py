@@ -1,25 +1,48 @@
 import gymnasium as gym
 import shimmy
+import torch
 import Algorithms.SAC_Robin as SAC
 import Algorithms.PPO as PPO
+import Algorithms.TD3 as TD3
+import Algorithms.GRPO as GRPO
 import time
 import numpy as np
 import Plotting as plot
+import Basic_Functions as bf
 
 # Main Loop
-ENV_NAMES = ["dm_control/acrobot-swingup-v0"]#"CartPole-swingup-v0", "Acrobot-v1"]#, "CarRacing-v3"]
-agents = [PPO.PPO]#, SAC.SAC] # List of agents
+ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"] # List of environments
+agents = [GRPO.GRPO, TD3.TD3, PPO.PPO, SAC.SAC] # List of agents
 
 
 all_results = {}
+
+# Set seed for global reproducibility so that all libraries are seeded consistently.
+"""
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+"""
 
 np.random.seed(42)
 
 for env_name in ENV_NAMES:
     env = gym.make(env_name)
+
+    """
+    Special handling for CarRacing-v3 to apply the action wrapper and ensure compatibility with the agents.
+    See the added methods in Basic_Functions.py for more explanation.
+    if env_name == "CarRacing-v3":
+        env = bf.CarRacingWrapper(env)
     
     if isinstance(env.observation_space, gym.spaces.Dict):
         env = gym.wrappers.FlattenObservation(env)
+
+    if isinstance(env.observation_space, gym.spaces.Dict):
+        env = gym.wrappers.FlattenObservation(env)"""
+
 
     # Initialize the nested dictionary for this environment right away
     if env_name not in all_results:
@@ -44,7 +67,7 @@ for env_name in ENV_NAMES:
 
                 next_state, reward, done, truncated, _ = env.step(action)
 
-                agent.step(state, action, reward, next_state, done)
+                agent.step(state, action, reward, next_state, done or truncated)  # Pass done or truncated to step() for proper episode handling with grpo
                 
                 state, ep_reward = next_state, ep_reward + reward
                 if done or truncated: break
