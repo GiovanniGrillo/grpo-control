@@ -6,9 +6,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
 import random
-import matplotlib.pyplot as plt
-import os
-import pandas as pd
+import Basic_Functions as bf
 
 # =========================================================================================
 # SAC Agent Implementation
@@ -16,7 +14,7 @@ import pandas as pd
 
 class ReplayBuffer:
     """Experience Replay Buffer to store and sample transitions."""
-    def __init__(self, capacity):
+    def __init__(self, capacity = 10000):
         self.buffer = []                                           
         self.capacity = capacity                                   
         self.position = 0                                          
@@ -35,46 +33,11 @@ class ReplayBuffer:
     def __len__(self):
         return len(self.buffer)                                    
 
-class FeatureExtractor(nn.Module):
-    """
-    Automated Feature Extractor: 
-    Detects if the input is an image (3D) or a vector (1D) and applies CNN or Identity.
-    """
-    def __init__(self, observation_space):
-        super(FeatureExtractor, self).__init__()
-        
-        # Check for image input (Height, Width, Channels)
-        if len(observation_space.shape) == 3:
-            self.is_image = True
-            h, w, c = observation_space.shape # Gymnasium standard: (H, W, C)
-            
-            self.cnn = nn.Sequential(
-                nn.Conv2d(c, 32, kernel_size=8, stride=4), nn.ReLU(),
-                nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
-                nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
-                nn.Flatten()
-            )
-            
-            # Compute output dimension of CNN
-            with torch.no_grad():
-                dummy_input = torch.zeros(1, c, h, w)
-                self.feature_dim = self.cnn(dummy_input).shape[1]
-        else:
-            self.is_image = False
-            self.feature_dim = observation_space.shape[0]
-
-    def forward(self, x):
-        if self.is_image:
-            # Permute from (Batch, H, W, C) to (Batch, C, H, W) and normalize pixels to [0, 1]
-            x = x.permute(0, 3, 1, 2) / 255.0
-            return self.cnn(x)
-        return x 
-
 class QNetwork(nn.Module):
     """Critic Network: Estimates the soft Q-value Q(s, a)."""
     def __init__(self, observation_space, action_dim, hidden_dim):
         super(QNetwork, self).__init__()
-        self.extractor = FeatureExtractor(observation_space) # Image/Vector processing
+        self.extractor = bf.FeatureExtractor(observation_space) # Image/Vector processing
         
         self.fc = nn.Sequential(
             nn.Linear(self.extractor.feature_dim + action_dim, hidden_dim), nn.ReLU(),
@@ -92,7 +55,7 @@ class PolicyNetwork(nn.Module):
         super(PolicyNetwork, self).__init__()
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
-        self.extractor = FeatureExtractor(observation_space)
+        self.extractor = bf.FeatureExtractor(observation_space)
         
         self.fc = nn.Sequential(
             nn.Linear(self.extractor.feature_dim, hidden_dim), nn.ReLU(),
@@ -121,16 +84,20 @@ class PolicyNetwork(nn.Module):
 
 class SAC:
     """Soft Actor-Critic Agent."""
-    def __init__(self, env, hidden_dim=256, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2):
+    def __init__(self, env, hidden_dim=256, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2, buffer_capacity=10000):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.gamma, self.tau = gamma, tau
-        
+        self.memory = ReplayBuffer(capacity=buffer_capacity)
+        # Determine if the environment uses discrete or continuous actions
+        self.is_discrete = isinstance(env.action_space, gym.spaces.Discrete)
+
         # Robust action_dim detection
         if isinstance(env.action_space, gym.spaces.Discrete):
             action_dim = env.action_space.n
         else:
             # For Box / Continuous spaces
             action_dim = env.action_space.shape[0]
+        self.action_dim = action_dim
 
         obs_space = env.observation_space
 
@@ -152,18 +119,36 @@ class SAC:
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.alpha_opt = optim.Adam([self.log_alpha], lr=lr)
 
+    def step(self, state, action, reward, next_state, done):
+        self.memory.push(state, action, reward, next_state, done)
+        if len(self.memory) > 128:
+            self.update(self.memory, 128)
+
     def select_action(self, state, evaluate=False):
         state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         if evaluate:
             mu, _ = self.actor(state)
             return torch.tanh(mu).detach().cpu().numpy()[0]
         action, _ = self.actor.sample(state)
-        return action.detach().cpu().numpy()[0]
+        # Convert tensor to numpy array
+        action_array = action.detach().cpu().numpy()[0]
+        # The agent formats the action itself to match the environment's requirements
+        if self.is_discrete:
+            return np.argmax(action_array)
+        return action_array
+        
 
     def update(self, buffer, batch_size):
         s, a, r, s_next, done = buffer.sample(batch_size)
         s, a, r, s_next, done = map(lambda x: torch.FloatTensor(x).to(self.device), [s, a, r, s_next, done])
         r, done = r.unsqueeze(1), done.unsqueeze(1)
+
+        if self.is_discrete:
+            # Convert 1D integer action to 2D one-hot vector (batch_size, action_dim)
+            a = F.one_hot(a.long(), num_classes=self.action_dim).float()
+        elif len(a.shape) == 1:
+            # Catch case where 1D continuous action lost its second dimension
+            a = a.unsqueeze(1)
 
         # Target Q calculation
         with torch.no_grad():
@@ -192,60 +177,5 @@ class SAC:
             for target_param, param in zip(t.parameters(), s_net.parameters()):
                 target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
 
-# =========================================================================================
-# Visualization and Training Loop
-# =========================================================================================
 
-def save_and_plot_results(rewards_dict, folder="plots"):
-    if not os.path.exists(folder): os.makedirs(folder)
-    
-    # Save CSV data
-    pd.DataFrame.from_dict(rewards_dict, orient='index').transpose().to_csv(os.path.join(folder, "data.csv"))
 
-    # Plotting
-    fig, axs = plt.subplots(1, 3, figsize=(18, 5))
-    for i, (env_name, rewards) in enumerate(rewards_dict.items()):
-        axs[i].plot(rewards, alpha=0.3, label='Raw')
-        if len(rewards) > 10:
-            axs[i].plot(pd.Series(rewards).rolling(10).mean(), label='MA10', linewidth=2)
-        axs[i].set_title(env_name); axs[i].legend()
-    
-    plt.savefig(os.path.join(folder, "learning_curves.png"))
-    plt.close()
-
-# Main Loop
-ENV_NAMES = ["CarRacing-v3", "CartPole-v1", "Acrobot-v1"]
-all_results = {}
-
-for env_name in ENV_NAMES:
-    env = gym.make(env_name)
-    agent = SAC(env)
-    buffer = ReplayBuffer(50000) # Smaller buffer for RAM safety with images 50000
-    env_rewards = []
-
-    for ep in range(1000):                                       # Episode loop 1000
-        state, _ = env.reset()                                  # Reset environment
-        ep_reward = 0
-        for t in range(1000):                                     # Step loop 1000
-            action = agent.select_action(state)
-            
-            # Action Rescaling for CarRacing
-            if env_name == "CarRacing-v3":
-                actual_action = np.array([action[0], (action[1]+1)/2, (action[2]+1)/2])
-            else:
-                actual_action = np.argmax(action)
-
-            next_state, reward, done, truncated, _ = env.step(actual_action)
-            buffer.push(state, action, reward, next_state, done)
-            
-            if len(buffer) > 128: agent.update(buffer, 128)
-            state, ep_reward = next_state, ep_reward + reward
-            if done or truncated: break
-        
-        env_rewards.append(ep_reward)
-        if ep % 5 == 0: print(f"{env_name} Ep {ep}: {ep_reward}")
-
-    all_results[env_name] = env_rewards
-    env.close()
-
-save_and_plot_results(all_results)
