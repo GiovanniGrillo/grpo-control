@@ -144,9 +144,11 @@ class PPO:
         rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
 
         # 2. Buffer in Tensoren umwandeln
-        old_states = torch.squeeze(torch.stack(self.buffer.states, dim=0)).detach()
-        old_actions = torch.squeeze(torch.stack(self.buffer.actions, dim=0)).detach()
-        old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs, dim=0)).detach()
+        # Use .squeeze(1) to safely only remove the inserted batch dimension, 
+        # preserving the action dimension even if it is 1.
+        old_states = torch.stack(self.buffer.states, dim=0).squeeze(1).detach()
+        old_actions = torch.stack(self.buffer.actions, dim=0).squeeze(1).detach()
+        old_logprobs = torch.stack(self.buffer.logprobs, dim=0).squeeze(1).detach()
 
         # 3. K_epochs lang optimieren
         for _ in range(self.K_epochs):
