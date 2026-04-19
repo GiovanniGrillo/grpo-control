@@ -7,8 +7,8 @@ import numpy as np
 import Plotting as plot
 
 # Main Loop
-ENV_NAMES = ["dm_control/acrobot-swingup-v0"]#"CartPole-swingup-v0", "Acrobot-v1"]#, "CarRacing-v3"]
-agents = [PPO.PPO]#, SAC.SAC] # List of agents
+ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0"]#, "CarRacing-v3"]
+agents = [PPO.PPO, SAC.SAC] # List of agents
 
 
 all_results = {}
@@ -35,7 +35,7 @@ for env_name in ENV_NAMES:
         
         env_rewards = []
 
-        for ep in range(1000):                                       # Episode loop 500
+        for ep in range(500):                                       # Episode loop 500
             state, _ = env.reset()                                  # Reset environment
             ep_reward = 0
 
@@ -51,7 +51,7 @@ for env_name in ENV_NAMES:
             
             env_rewards.append(ep_reward)
             step_time = time.time() - start_time
-            if ep % 5 == 0: print(f"{env_name} Ep {ep}: {ep_reward} Time: {step_time:.2f}s")
+            if ep % 5 == 0: print(f"{env_name} Ep {ep}: {ep_reward:.5f} Time: {step_time:.2f}s")
 
         # Store the rewards under the specific algorithm's name
         all_results[env_name][algo_name] = env_rewards        
