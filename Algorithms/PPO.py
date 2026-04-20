@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Categorical, MultivariateNormal
 import gymnasium as gym
-import Basic_Functions as bf
+import utils as bf
 
 class RolloutBuffer:
     """Speicher für PPO (On-Policy Daten)"""

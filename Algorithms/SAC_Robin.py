@@ -6,7 +6,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Normal
 import random
-import Basic_Functions as bf
+import utils as bf
 
 # =========================================================================================
 # SAC Agent Implementation
