@@ -112,9 +112,17 @@ for env_name in ENV_NAMES:
                 if ep % 5 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
 
             # Store the rewards under the specific algorithm's name
-            all_results[env_name][algo_name].append(eval_rewards)        
+            all_results[env_name][algo_name].append(eval_rewards)
+        
+        current_data = {
+            env_name: {
+                algo_name: all_results[env_name][algo_name]
+            }
+        }
+        plot.save_data(current_data)            # Save the data after each algorithm to ensure that we have intermediate results even if the process is interrupted
+        plot.plot_data()
     
     env.close()
+    eval_env.close()
 
-plot.save_data(all_results)
 plot.plot_data()

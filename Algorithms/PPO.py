@@ -49,17 +49,20 @@ class ActorCritic(nn.Module):
         )
 
 
-    def act(self, state):
+    def act(self, state, evaluate=False):
         x = self.extractor(state)
         
         if self.is_discrete:
             action_logits = self.actor_head(self.actor_base(x))
             dist = Categorical(logits=action_logits)
+
+            action = torch.argmax(action_logits, dim=-1) if evaluate else dist.sample()
         else:
             action_mean = torch.tanh(self.actor_head(self.actor_base(x)))
             dist = MultivariateNormal(action_mean, torch.diag(self.action_var))
+
+            action = action_mean if evaluate else dist.sample()
             
-        action = dist.sample()
         action_logprob = dist.log_prob(action)
         state_val = self.critic(x)
 
@@ -106,13 +109,14 @@ class PPO:
     def select_action(self, state, evaluate=False):
         with torch.no_grad():
             state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            action, action_logprob, state_val = self.policy_old.act(state)
+            action, action_logprob, state_val = self.policy_old.act(state, evaluate=evaluate)
             
-            # PPO muss diese Werte intern speichern
-            self.buffer.states.append(state)
-            self.buffer.actions.append(action)
-            self.buffer.logprobs.append(action_logprob)
-            self.buffer.values.append(state_val)
+            if not evaluate:
+                # PPO muss diese Werte intern speichern
+                self.buffer.states.append(state)
+                self.buffer.actions.append(action)
+                self.buffer.logprobs.append(action_logprob)
+                self.buffer.values.append(state_val)
 
             # Umwandlung für Gymnasium
             if self.policy_old.is_discrete:

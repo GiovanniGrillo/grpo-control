@@ -132,10 +132,17 @@ class TD3:
     def step(self, state, action, reward, next_state, done):
         """Unified step function called by Simulation.py"""
         self.memory.push(state, action, reward, next_state, done)
-        
+        # Grouped updates: Perform updates every 50 steps to improve sample efficiency
+        self.total_steps += 1
+    
+        if len(self.memory) > 1000 and self.total_steps % 50 == 0:
+            for _ in range(50):
+                self.update(batch_size=256)
+
+        """ Ungrouped updates
         # Start updating once we have enough samples
         if len(self.memory) > 256: 
-            self.update(batch_size=256)
+            self.update(batch_size=256)"""
 
     def update(self, batch_size):
         self._update_count += 1
