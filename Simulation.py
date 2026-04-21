@@ -13,13 +13,13 @@ import utils as bf
 import random
 
 # Main Loop
-# ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"] # List of environments ["dm_control/cartpole-swingup-v0"]
-# agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO] # List of agents GRPO.GRPO
+ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"] # List of environments ["dm_control/cartpole-swingup-v0"]
+agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO] # List of agents GRPO.GRPO
 
-ENV_NAMES = ["dm_control/cartpole-swingup-v0"]
-agents = [CGRPO.CGRPO]
+# ENV_NAMES = ["dm_control/cartpole-swingup-v0"]
+# agents = [CGRPO.CGRPO]
 
-master_seeds = np.random.randint(size = 3, low=0, high=10000) # Generate 5 random seeds for reproducibility across runs
+master_seeds = np.random.randint(size = 5, low=0, high=10000) # Generate 5 random seeds for reproducibility across runs
 
 all_results = {}
 
@@ -76,7 +76,7 @@ for env_name in ENV_NAMES:
 
             eval_rewards = []
 
-            for ep in range(100):                                       # Episode loop 500
+            for ep in range(1000):                                       # Episode loop 500
                 # ==========================================
                 # 1. TRAINING (Collect data & learn)
                 # ==========================================
