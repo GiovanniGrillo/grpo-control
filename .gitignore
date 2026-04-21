@@ -1,0 +1,19 @@
+# Python-Müll (wird automatisch generiert)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Daten & Ergebnisse (damit dein GitHub nicht platzt)
+plots/
+*.png
+*.csv
+all_results.json
+
+# Virtuelle Umgebungen
+venv/
+.env
+
+# Betriebssystem-Spezifisches
+.DS_Store
+Thumbs.db
