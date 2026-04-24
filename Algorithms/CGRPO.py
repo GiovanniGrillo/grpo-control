@@ -4,7 +4,10 @@ import torch.optim as optim
 import gymnasium as gym
 import numpy as np
 from copy import deepcopy
-from sklearn.cluster import KMeans, DBSCAN
+from sklearn.cluster import KMeans, DBSCAN, HDBSCAN
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 import utils as bf
 
 # =========================================================================================
@@ -67,9 +70,9 @@ class Actor(nn.Module):
 
 class CGRPO:
     """Continuous Group Relative Policy Optimization"""
-    def __init__(self, env, seed = 42, hidden_dim=256, lr=3e-4, N=5, K=2, epsilon=0.2, 
+    def __init__(self, env, seed = 42, hidden_dim=256, lr=3e-4, N=10, K=2, epsilon=0.2, 
                  tau=0.5, lam_s=0.01, lam_d=0.01, gamma=0.99, 
-                 dbscan_eps=0.5, dbscan_min_samples=5):
+                 dbscan_eps=0.25):#, dbscan_min_samples=10, dbscan_cluster_size=150):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
         self.N = N 
@@ -80,8 +83,9 @@ class CGRPO:
         self.lam_d = lam_d 
         self.gamma = gamma
         self.dbscan_eps = dbscan_eps               
-        self.dbscan_min_samples = dbscan_min_samples 
-        
+        # self.dbscan_min_samples = dbscan_min_samples 
+        # self.dbscan_cluster_size = dbscan_cluster_size
+
         # Population of Actors
         self.actors = nn.ModuleList([Actor(env.observation_space, env.action_space, hidden_dim).to(self.device) for _ in range(N)])
         self.old_actors = nn.ModuleList([Actor(env.observation_space, env.action_space, hidden_dim).to(self.device) for _ in range(N)])
@@ -118,11 +122,11 @@ class CGRPO:
 
     def step(self, state, action, reward, next_state, done):
         self.buffer.add(self.current_policy_idx, self._cached_obs, self._cached_feat, self._cached_action, self._cached_logprob, reward)
-        
+
         if done:
             self.buffer.finish_episode(self.current_policy_idx)
             self.current_policy_idx += 1
-            
+
             # If all N policies have collected an episode, trigger update
             if self.current_policy_idx >= self.N:
                 self.update()
@@ -142,7 +146,7 @@ class CGRPO:
                 param.data.copy_(tau * avg_param + (1 - tau) * param.data)                                          # Soft update the reference policy's parameters towards the average of the top policies (this creates a more robust reference policy that represents a strong strategy for others to learn from) 
 
 
-    def update(self):
+    def update(self):        
         all_phi = []                                                                            # store feature vector for policy phi_i
         all_returns = []
         all_features_np = []
@@ -197,8 +201,42 @@ class CGRPO:
         trajectory_lengths = [len(f) for f in all_features_np]                                  # Length of each trajectory (number of steps) for indexing
         start_indices = np.cumsum([0] + trajectory_lengths[:-1])                                # Starting index of each trajectory in the flattened feature array
 
-        dbscan = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(all_states_flat) # Cluster states into contexts based on their latent features using DBSCAN
-        global_labels = dbscan.labels_                                                          # Cluster labels for each state in the flattened feature array
+        #### State clustering with DBSCAN
+        scaler = StandardScaler()
+        all_states_scaled = scaler.fit_transform(all_states_flat)
+
+        # Reduce to 2D for visualization using PCA
+        pca_clustering = PCA(n_components=min(10, all_states_flat.shape[1])) # Keep enough components to retain most variance for clustering
+        all_states_pca = pca_clustering.fit_transform(all_states_scaled) # Apply PCA to the scaled features for better clustering performance and visualization (reducing dimensionality while retaining most of the
+
+        # DBSCAN parameters
+        total_points = all_states_pca.shape[0]
+        dynamic_cluster_size = max(50, int(total_points * 0.01)) 
+        dynamic_min_samples = max(10, int(dynamic_cluster_size / 5))
+
+        #dbscan = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(all_states_flat) # Cluster states into contexts based on their latent features using DBSCAN
+        # dbscan = HDBSCAN(min_cluster_size=self.dbscan_cluster_size, min_samples = self.dbscan_min_samples, cluster_selection_epsilon = 0.5,copy = True) # Cluster states into contexts based on their latent features using DBSCAN
+        dbscan = HDBSCAN(min_cluster_size=dynamic_cluster_size, min_samples = dynamic_min_samples, cluster_selection_epsilon = self.dbscan_eps,copy = True) # Cluster states into contexts based on their latent features using DBSCAN
+
+        #global_labels = dbscan.labels_                                                          # Cluster labels for each state in the flattened feature array
+        global_labels = dbscan.fit_predict(all_states_pca) # Cluster states into contexts based on their PCA-reduced features using HDBSCAN (this often gives better clusters in high-dimensional spaces)
+
+        # Visualize all_states_flat via PCA scatter plot colored by DBSCAN clusters
+        plt.figure(figsize=(12, 8))
+        scatter = plt.scatter(all_states_pca[:, 0], all_states_pca[:, 1], c=global_labels,
+                            cmap='tab20', alpha=0.7, s=30, edgecolors='k', linewidth=0.5)
+        plt.colorbar(scatter, label='Cluster Label (-1 = noise)')
+        plt.xlabel(f'PC1 ({pca_clustering.explained_variance_ratio_[0]:.2%})')
+        plt.ylabel(f'PC2 ({pca_clustering.explained_variance_ratio_[1]:.2%})')
+        plt.title(f'State Feature Space (PCA) - HDBSCAN Clusters')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig('state_space_clustered.png', dpi=150)
+        plt.close()
+
+        n_clusters = len(set(global_labels)) - (1 if -1 in global_labels else 0)
+        n_noise = list(global_labels).count(-1)
+        print(f"HDBSCAN Clustering: {n_clusters} clusters, {n_noise} noise points")
 
         state_clusters_per_policy = []                                                          # List to hold cluster labels for each policy's trajectory
         for i in range(self.N):

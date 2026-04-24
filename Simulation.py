@@ -12,14 +12,18 @@ import Plotting as plot
 import utils as bf
 import random
 
+import warnings
+# Schaltet die nervigen DeprecationWarnings von sklearn/numpy stumm
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 # Main Loop
-ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"] # List of environments ["dm_control/cartpole-swingup-v0"]
-agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO] # List of agents GRPO.GRPO
+# ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"] # List of environments ["dm_control/cartpole-swingup-v0"]
+# agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO] # List of agents GRPO.GRPO
 
-# ENV_NAMES = ["dm_control/cartpole-swingup-v0"]
-# agents = [CGRPO.CGRPO]
+ENV_NAMES = ["dm_control/acrobot-swingup-v0"]
+agents = [CGRPO.CGRPO]
 
-master_seeds = np.random.randint(size = 5, low=0, high=10000) # Generate 5 random seeds for reproducibility across runs
+master_seeds = np.random.randint(size = 1, low=0, high=10000) # Generate 5 random seeds for reproducibility across runs
 
 all_results = {}
 
@@ -33,8 +37,8 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 for env_name in ENV_NAMES:
-    env = gym.make(env_name)
-    eval_env = gym.make(env_name) # Separate environment for evaluation to ensure that training and evaluation are independent and do not interfere with each other
+    env = gym.make(env_name, max_episode_steps=1000)                # Create the training environment with a max episode length of 1000 steps to ensure that episodes terminate
+    eval_env = gym.make(env_name, max_episode_steps=1000)           # Separate environment for evaluation to ensure that training and evaluation are independent and do not interfere with each other
 
     """
     Special handling for CarRacing-v3 to apply the action wrapper and ensure compatibility with the agents.
@@ -76,30 +80,33 @@ for env_name in ENV_NAMES:
 
             eval_rewards = []
 
-            for ep in range(1000):                                       # Episode loop 500
+            for ep in range(500):                                       # Episode loop 500
                 # ==========================================
                 # 1. TRAINING (Collect data & learn)
                 # ==========================================
                 state, _ = env.reset()                                  # Reset environment
                 # ep_reward = 0
 
-                for t in range(1000):                                     # Step loop 1000
+                for t in range(1001):                                     # Step loop 1000
                     action = agent.select_action(state)
 
-                    next_state, reward, done, truncated, _ = env.step(action)
-
-                    agent.step(state, action, reward, next_state, done or truncated)  # Pass done or truncated to step() for proper episode handling with grpo
+                    next_state, reward, done, truncated, info = env.step(action)
                     
+                    # For dm_control: treat truncated (time limit) as episode end
+                    episode_done = done or truncated
+                    agent.step(state, action, reward, next_state, episode_done)
+
                     state = next_state
                     # state, ep_reward = next_state, ep_reward + reward
-                    if done or truncated: break
+                    if episode_done:
+                        break
                 
                 # ==========================================
                 # 2. EVALUATION
                 # ==========================================
                 eval_state, _ = eval_env.reset()
                 eval_ep_reward = 0
-                for t in range(1000):
+                for t in range(500):
                     eval_action = agent.select_action(eval_state, evaluate=True) 
                     eval_state, r, d, trunc, _ = eval_env.step(eval_action)
                     eval_ep_reward += r
@@ -109,7 +116,7 @@ for env_name in ENV_NAMES:
 
                 step_time = time.time() - start_time
                 Environment_name = env_name.split("/")[-1] # Extract the environment name for cleaner logging
-                if ep % 5 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
+                if ep % 1 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
 
             # Store the rewards under the specific algorithm's name
             all_results[env_name][algo_name].append(eval_rewards)
