@@ -1,11 +1,13 @@
 import gymnasium as gym
 import shimmy
 import torch
+import os
 import Algorithms.SAC_Robin as SAC
 import Algorithms.PPO as PPO
 import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
+import Algorithms.GRPO_Giovanni as GRPO_Giovanni
 import time
 import numpy as np
 import Plotting as plot
@@ -13,17 +15,45 @@ import utils as bf
 import random
 
 import warnings
-# Schaltet die nervigen DeprecationWarnings von sklearn/numpy stumm
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Main Loop
-# ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"] # List of environments ["dm_control/cartpole-swingup-v0"]
-# agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO] # List of agents GRPO.GRPO
+DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
+AGENT_REGISTRY = {
+    "TD3": TD3.TD3,
+    "PPO": PPO.PPO,
+    "SAC": SAC.SAC,
+    "GRPO": GRPO.GRPO,
+    "CGRPO": CGRPO.CGRPO,
+    "GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
+}
 
-ENV_NAMES = ["dm_control/acrobot-swingup-v0"]
-agents = [CGRPO.CGRPO]
+RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
+MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
+MAX_STEPS = int(os.getenv("MAX_STEPS", "1001" if RUN_MODE == "full" else "400"))
+NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
 
-master_seeds = np.random.randint(size = 1, low=0, high=10000) # Generate 5 random seeds for reproducibility across runs
+env_override = os.getenv("ENV_NAMES", "").strip()
+if env_override:
+    ENV_NAMES = [name.strip() for name in env_override.split(",") if name.strip()]
+else:
+    ENV_NAMES = DEFAULT_ENV_NAMES
+
+agent_override = os.getenv("AGENTS", "").strip()
+if agent_override:
+    requested = [name.strip() for name in agent_override.split(",") if name.strip()]
+    unknown = [name for name in requested if name not in AGENT_REGISTRY]
+    if unknown:
+        raise ValueError(f"Unknown AGENTS requested: {unknown}. Available: {list(AGENT_REGISTRY.keys())}")
+    agents = [AGENT_REGISTRY[name] for name in requested]
+else:
+    agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
+
+master_seeds = np.random.randint(size=NUM_SEEDS, low=0, high=10000) # Generate random seeds for reproducibility across runs
+
+print(f"RUN_MODE={RUN_MODE} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
+print(f"ENV_NAMES={ENV_NAMES}")
+print(f"AGENTS={[cls.__name__ for cls in agents]}")
 
 all_results = {}
 
@@ -80,14 +110,14 @@ for env_name in ENV_NAMES:
 
             eval_rewards = []
 
-            for ep in range(500):                                       # Episode loop 500
+            for ep in range(MAX_EPISODES):
                 # ==========================================
                 # 1. TRAINING (Collect data & learn)
                 # ==========================================
                 state, _ = env.reset()                                  # Reset environment
                 # ep_reward = 0
 
-                for t in range(1001):                                     # Step loop 1000
+                for t in range(MAX_STEPS):
                     action = agent.select_action(state)
 
                     next_state, reward, done, truncated, info = env.step(action)
@@ -106,7 +136,7 @@ for env_name in ENV_NAMES:
                 # ==========================================
                 eval_state, _ = eval_env.reset()
                 eval_ep_reward = 0
-                for t in range(500):
+                for t in range(MAX_STEPS):
                     eval_action = agent.select_action(eval_state, evaluate=True) 
                     eval_state, r, d, trunc, _ = eval_env.step(eval_action)
                     eval_ep_reward += r
