@@ -72,7 +72,7 @@ class CGRPO:
     """Continuous Group Relative Policy Optimization"""
     def __init__(self, env, seed = 42, hidden_dim=256, lr=3e-4, N=10, K=2, epsilon=0.2, 
                  tau=0.5, lam_s=0.01, lam_d=0.01, gamma=0.99, 
-                 dbscan_eps=0.25):#, dbscan_min_samples=10, dbscan_cluster_size=150):
+                 dbscan_eps=0.4):#, dbscan_min_samples=10, dbscan_cluster_size=150):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
         self.N = N 
