@@ -1,0 +1,12 @@
+[
+    {
+        "env": "dm_control/cartpole-swingup-v0",
+        "algo": "CGRPO",
+        "time": 568.8624906539917
+    },
+    {
+        "env": "dm_control/acrobot-swingup-v0",
+        "algo": "CGRPO",
+        "time": 451.3099727630615
+    }
+]

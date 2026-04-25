@@ -19,7 +19,7 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Main Loop
-DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0"]#["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
+DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]#["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0"]
 AGENT_REGISTRY = {
     "TD3": TD3.TD3,
     "PPO": PPO.PPO,
@@ -48,7 +48,7 @@ if agent_override:
         raise ValueError(f"Unknown AGENTS requested: {unknown}. Available: {list(AGENT_REGISTRY.keys())}")
     agents = [AGENT_REGISTRY[name] for name in requested]
 else:
-    agents = [CGRPO.CGRPO]#TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
+    agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]#CGRPO.CGRPO]#
 
 np.random.seed(42) # Set a global seed for reproducibility of the master seeds
 master_seeds = np.random.randint(size=NUM_SEEDS, low=0, high=10000) # Generate random seeds for reproducibility across runs
