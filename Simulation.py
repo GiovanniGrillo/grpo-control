@@ -19,7 +19,7 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Main Loop
-DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
+DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0"]#["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
 AGENT_REGISTRY = {
     "TD3": TD3.TD3,
     "PPO": PPO.PPO,
@@ -32,7 +32,7 @@ AGENT_REGISTRY = {
 RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
 MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
 MAX_STEPS = int(os.getenv("MAX_STEPS", "1000" if RUN_MODE == "full" else "400"))
-NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
+NUM_SEEDS = int(os.getenv("NUM_SEEDS", "3" if RUN_MODE == "full" else "2"))
 
 env_override = os.getenv("ENV_NAMES", "").strip()
 if env_override:
@@ -48,8 +48,9 @@ if agent_override:
         raise ValueError(f"Unknown AGENTS requested: {unknown}. Available: {list(AGENT_REGISTRY.keys())}")
     agents = [AGENT_REGISTRY[name] for name in requested]
 else:
-    agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
+    agents = [CGRPO.CGRPO]#TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
 
+np.random.seed(42) # Set a global seed for reproducibility of the master seeds
 master_seeds = np.random.randint(size=NUM_SEEDS, low=0, high=10000) # Generate random seeds for reproducibility across runs
 
 print(f"RUN_MODE={RUN_MODE} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
@@ -166,7 +167,7 @@ for env_name in ENV_NAMES:
         run_time = time.time() - start_time
         tracker.log(env_name, algo_name, run_time)
         tracker.save() # Save the timing data after each algorithm to ensure we have intermediate timing results
-        print(f"--- Runningtime for {algo_name} in {env_name}: {total_time_for_agent:.2f}s ---")
+        print(f"--- Runningtime for {algo_name} in {env_name}: {run_time:.2f}s ---")
 
         plot.plot_data()
     
