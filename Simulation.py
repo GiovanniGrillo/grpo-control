@@ -21,14 +21,13 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Main Loop
 DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
 AGENT_REGISTRY = {
-    "PPO": PPO.PPO}
-#     "TD3": TD3.TD3,
-#     "PPO": PPO.PPO,
-#     "SAC": SAC.SAC,
-#     "GRPO": GRPO.GRPO,
-#     "CGRPO": CGRPO.CGRPO,
-#     "GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
-# }
+    "TD3": TD3.TD3,
+    "PPO": PPO.PPO,
+    "SAC": SAC.SAC,
+    "GRPO": GRPO.GRPO,
+    "CGRPO": CGRPO.CGRPO,
+    "GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
+}
 
 RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
 MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
@@ -72,8 +71,8 @@ tracker = tl.TimeTracker()
 
 
 for env_name in ENV_NAMES:
-    env = gym.make(env_name, max_episode_steps=1000)                # Create the training environment with a max episode length of 1000 steps to ensure that episodes terminate
-    eval_env = gym.make(env_name, max_episode_steps=1000)           # Separate environment for evaluation to ensure that training and evaluation are independent and do not interfere with each other
+    env = gym.make(env_name, max_episode_steps=MAX_STEPS)                # Create the training environment with a max episode length of 1000 steps to ensure that episodes terminate
+    eval_env = gym.make(env_name, max_episode_steps=MAX_STEPS)           # Separate environment for evaluation to ensure that training and evaluation are independent and do not interfere with each other
 
     """
     Special handling for CarRacing-v3 to apply the action wrapper and ensure compatibility with the agents.
@@ -109,7 +108,7 @@ for env_name in ENV_NAMES:
         for seed in master_seeds:
             set_seed(seed) # Set the seed for reproducibility for this run
             
-            start_time = time.time()
+            seed_time = time.time()
             agent = AgentClass(env) # Initialize agent with environment
             
             print(f"\n--- Run: {algo_name} | Seed: {seed} ---")
@@ -150,9 +149,9 @@ for env_name in ENV_NAMES:
 
                 eval_rewards.append(eval_ep_reward)
 
-                step_time = time.time() - start_time
+                step_time = time.time() - seed_time
                 Environment_name = env_name.split("/")[-1] # Extract the environment name for cleaner logging
-                if ep % 1 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
+                if ep % 10 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
 
             # Store the rewards under the specific algorithm's name
             all_results[env_name][algo_name].append(eval_rewards)
