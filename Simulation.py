@@ -68,7 +68,7 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-tracker = tl.TimeTracker()
+tracker = tl.TimeTracker(filename=os.path.join("plots", "run_times.json"))
 
 
 for env_name in ENV_NAMES:

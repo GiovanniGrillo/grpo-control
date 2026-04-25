@@ -17,3 +17,8 @@ venv/
 # Betriebssystem-Spezifisches
 .DS_Store
 Thumbs.db
+
+# backups
+*.bak
+*.backup
+/backups/
