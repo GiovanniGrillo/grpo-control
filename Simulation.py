@@ -32,7 +32,7 @@ AGENT_REGISTRY = {
 RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
 MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
 MAX_STEPS = int(os.getenv("MAX_STEPS", "1000" if RUN_MODE == "full" else "400"))
-NUM_SEEDS = int(os.getenv("NUM_SEEDS", "3" if RUN_MODE == "full" else "2"))
+NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
 
 env_override = os.getenv("ENV_NAMES", "").strip()
 if env_override:
