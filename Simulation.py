@@ -67,7 +67,7 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-tracker = tl.TimeTracker()
+tracker = tl.TimeTracker(filename=os.path.join("plots", "run_times.json"))
 
 
 for env_name in ENV_NAMES:
@@ -166,7 +166,7 @@ for env_name in ENV_NAMES:
         run_time = time.time() - start_time
         tracker.log(env_name, algo_name, run_time)
         tracker.save() # Save the timing data after each algorithm to ensure we have intermediate timing results
-        print(f"--- Runningtime for {algo_name} in {env_name}: {total_time_for_agent:.2f}s ---")
+        print(f"--- Runningtime for {algo_name} in {env_name}: {run_time:.2f}s ---")
 
         plot.plot_data()
     
