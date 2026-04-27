@@ -13,7 +13,7 @@ all_results.json
 # Virtuelle Umgebungen
 venv/
 .env
-
+.venv/
 # Betriebssystem-Spezifisches
 .DS_Store
 Thumbs.db
