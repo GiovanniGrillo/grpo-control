@@ -9,29 +9,39 @@ from copy import deepcopy
 import utils as bf
 
 # =========================================================================================
-# TD3 Agent Implementation
+# TD3 Agent Implementation (Optimized for both Vector & Image Environments)
 # =========================================================================================
 
 class ReplayBuffer:
-    """Experience Replay Buffer (Identical to SAC_Robin.py for consistency)"""
+    """Experience Replay Buffer"""
     def __init__(self, capacity=100000):
         self.buffer = []                                           
         self.capacity = capacity                                   
         self.position = 0                                          
 
     def push(self, state, action, reward, next_state, done):
+        # FIX: Store as uint8 to save 10+ GB of RAM in Colab
+        state = np.array(state * 255.0, dtype=np.uint8)
+        next_state = np.array(next_state * 255.0, dtype=np.uint8)
+        
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)                               
         self.buffer[self.position] = (state, action, reward, next_state, done) 
-        self.position = (self.position + 1) % self.capacity        
+        self.position = (self.position + 1) % self.capacity   
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)             
         state, action, reward, next_state, done = map(np.stack, zip(*batch)) 
-        return state, action, reward, next_state, done             
+        
+        # FIX: Convert back to float32 (0.0 to 1.0) only when sending to the GPU
+        state = state.astype(np.float32) / 255.0
+        next_state = next_state.astype(np.float32) / 255.0
+        
+        return state, action, reward, next_state, done          
 
     def __len__(self):
         return len(self.buffer)                                    
+
 
 class Actor(nn.Module):
     def __init__(self, observation_space, act_dim, act_high, hidden=256):
@@ -49,6 +59,7 @@ class Actor(nn.Module):
         x = self.extractor(state)
         out = self.net(x)
         return torch.tanh(out) * self.act_scale
+
 
 class Critic(nn.Module):
     """Twin Q-networks."""
@@ -82,10 +93,12 @@ class Critic(nn.Module):
         x1 = self.extractor1(state)
         return self.q1_net(torch.cat([x1, action], dim=-1))
 
+
 class TD3:
     """Twin Delayed Deep Deterministic Policy Gradient (TD3) Agent"""
-    def __init__(self, env, hidden_dim=256, lr=3e-4, gamma=0.99, tau=5e-3, 
-                 policy_noise=0.2, noise_clip=0.5, policy_delay=2, expl_noise=0.1, buffer_capacity=100000):
+    def __init__(self, env, hidden_dim=256, lr=3e-4, gamma=0.99, tau=5e-3,
+                 policy_noise=0.2, noise_clip=0.5, policy_delay=2, expl_noise=0.1,
+                 start_timesteps=10000, buffer_capacity=100000):
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.gamma = gamma
@@ -94,9 +107,10 @@ class TD3:
         self.noise_clip = noise_clip
         self.policy_delay = policy_delay
         self.expl_noise = expl_noise
+        self.start_timesteps = start_timesteps
         self._update_count = 0
+        self.total_steps = 0
         
-        # Check if action space is continuous
         if isinstance(env.action_space, gym.spaces.Discrete):
             raise ValueError("TD3 requires a continuous action space (Box).")
 
@@ -114,15 +128,21 @@ class TD3:
         self.actor_target = deepcopy(self.actor)
         self.critic_target = deepcopy(self.critic)
 
-        # Optimizers
+        # Optimizers (Balanced learning rates for continuous control stability)
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr)
 
     def select_action(self, state, evaluate=False):
+        # 1. Pure Random Warmup (Crucial for Acrobot & initial image buffers)
+        if not evaluate and self.total_steps < self.start_timesteps:
+            return np.random.uniform(-self.act_high_np, self.act_high_np, size=self.action_dim).astype(np.float32)
+
+        # 2. Policy Action Selection
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         with torch.no_grad():
             action = self.actor(state_tensor).squeeze(0).cpu().numpy()
         
+        # 3. Add Exploration Noise (Constant, no decay)
         if not evaluate:
             noise = np.random.normal(0, self.expl_noise * self.act_high_np, size=self.action_dim).astype(np.float32)
             action = np.clip(action + noise, -self.act_high_np, self.act_high_np)
@@ -130,20 +150,15 @@ class TD3:
         return action
 
     def step(self, state, action, reward, next_state, done):
-        """Unified step function called by Simulation.py"""
         self.memory.push(state, action, reward, next_state, done)
-        # Grouped updates: Perform updates every 50 steps to improve sample efficiency
         self.total_steps += 1
     
-        if len(self.memory) > 1000 and self.total_steps % 50 == 0:
-            for _ in range(50):
-                self.update(batch_size=256)
+        # FIX: Update once every 4 steps to drastically reduce compute overhead
+        if len(self.memory) >= self.start_timesteps and self.total_steps % 4 == 0:
+            # You can do 1 update or multiple, but spacing it out keeps simulation fast
+            self.update(batch_size=256)
 
-        """ Ungrouped updates
-        # Start updating once we have enough samples
-        if len(self.memory) > 256: 
-            self.update(batch_size=256)"""
-
+            
     def update(self, batch_size):
         self._update_count += 1
         s, a, r, s_next, done = self.memory.sample(batch_size)
@@ -153,6 +168,7 @@ class TD3:
 
         # ---- Critic update ----
         with torch.no_grad():
+            # Target Policy Smoothing
             noise = (torch.randn_like(a) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
             next_act = (self.actor_target(s_next) + noise).clamp(-self.act_high, self.act_high)
 
@@ -164,6 +180,8 @@ class TD3:
 
         self.critic_opt.zero_grad()
         critic_loss.backward()
+        # Gradient clipping stabilizes updates, particularly when using CNN feature extractors
+        nn.utils.clip_grad_norm_(self.critic.parameters(), 1.0) 
         self.critic_opt.step()
 
         # ---- Delayed actor update ----
@@ -174,7 +192,7 @@ class TD3:
             actor_loss.backward()
             self.actor_opt.step()
 
-            # Soft updates
+            # Soft updates for target networks
             for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
