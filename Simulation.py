@@ -3,6 +3,7 @@ import shimmy
 import torch
 import os
 import Algorithms.SAC_Robin as SAC
+import Algorithms.SAC_Giovanni as SAC_Giovanni
 import Algorithms.PPO as PPO
 import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
@@ -24,6 +25,7 @@ AGENT_REGISTRY = {
     "TD3": TD3.TD3,
     "PPO": PPO.PPO,
     "SAC": SAC.SAC,
+    "SAC_Giovanni": SAC_Giovanni.SAC,
     "GRPO": GRPO.GRPO,
     "CGRPO": CGRPO.CGRPO,
     "GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
