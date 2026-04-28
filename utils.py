@@ -4,19 +4,20 @@ import gymnasium as gym
 import numpy as np
 
 class CarRacingActionWrapper(gym.ActionWrapper):
-    """
-    Translates the standard agent output [-1, 1] into the format expected by CarRacing-v3.
-    CarRacing expects:
-    - Steering: [-1, 1]
-    - Gas: [0, 1]
-    - Brake: [0, 1]
-    """
     def __init__(self, env):
         super().__init__(env)
+        self.action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
     
     def action(self, action):
-        # Scale gas (action[1]) and brake (action[2]) from [-1, 1] to [0, 1]
-        return np.array([action[0], (action[1] + 1) / 2, (action[2] + 1) / 2])
+        steering = np.clip(action[0], -1.0, 1.0)
+
+        # Map [-1, 1] to [0, 1]. Zero network output = zero throttle.
+        gas = np.clip((action[1] + 1.0) / 2.0, 0.0, 1.0)
+
+        # Map [-1, 1] to [0, 1]. Zero network output = zero brake.
+        brake = np.clip((action[2] + 1.0) / 2.0, 0.0, 1.0)
+
+        return np.array([steering, gas, brake])
     
     
 
@@ -103,3 +104,26 @@ class CarRacingWrapper(gym.ObservationWrapper):
         frame = self._preprocess(obs)
         self._frames[...] = frame
         return self._frames.copy(), info
+    
+
+class SkipFrame(gym.Wrapper):
+    """
+    Skips frames to speed up training. 
+    The agent chooses an action, and we repeat it for 'skip' frames, summing the reward.
+    """
+    def __init__(self, env, skip=4):
+        super().__init__(env)
+        self._skip = skip
+
+    def step(self, action):
+        total_reward = 0.0
+        terminated = False
+        truncated = False
+        
+        for _ in range(self._skip):
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            total_reward += reward
+            if terminated or truncated:
+                break
+                
+        return obs, total_reward, terminated, truncated, info
