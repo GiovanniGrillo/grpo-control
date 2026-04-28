@@ -337,12 +337,12 @@ class CGRPO:
             # Diversity Regularization (L_diversity)
             l_diversity = torch.tensor(0.0).to(self.device)                                             # Initialize diversity regularization term
             if self.lam_d > 0:                                                                          # Only calculate diversity regularization if lambda_d is greater than 0
-                mu_i = dist.mean                                                                        # Mean action of the current policy i (used for diversity regularization)
+                mu_i_avg = dist.mean.mean(dim=0, keepdim=True)                                             # Mean action of the current policy i (used for diversity regularization)
                 for j in range(self.N):
                     if i == j:
                         continue
-                    mu_j = all_mus[j]                                                                   # Mean action of policy j
-                    cos_sim = torch.cosine_similarity(mu_i, mu_j, dim=-1).mean()                        # Calculate cosine similarity between the mean actions of policy i and policy j
+                    mu_j_avg = all_mus[j].mean(dim=0, keepdim=True)                                                                   # Mean action of policy j
+                    cos_sim = torch.cosine_similarity(mu_i_avg, mu_j_avg, dim=-1)                      # Calculate cosine similarity between the mean actions of policy i and policy j
                     l_diversity += torch.max(torch.tensor(0.0).to(self.device), cos_sim - self.tau)     # Diversity regularization to encourage different policies to explore different strategies (penalize high similarity above a threshold tau)
 
             # Total Loss Zusammenführung

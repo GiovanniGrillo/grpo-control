@@ -3,6 +3,7 @@ import shimmy
 import torch
 import os
 import Algorithms.SAC_Robin as SAC
+import Algorithms.SAC_Giovanni as SAC_Giovanni
 import Algorithms.PPO as PPO
 import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
@@ -18,22 +19,20 @@ import time_logger as tl
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.fastest = True
-
 # Main Loop
-DEFAULT_ENV_NAMES = ["CarRacing-v3"]#["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0"]#["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0"]
+DEFAULT_ENV_NAMES = ["CarRacing-v3"]#["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
 AGENT_REGISTRY = {
     "TD3": TD3.TD3,
-    #"PPO": PPO.PPO,
-    #"SAC": SAC.SAC,
-    #"GRPO": GRPO.GRPO,
-    #"CGRPO": CGRPO.CGRPO,
-    #"GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
+    "PPO": PPO.PPO,
+    "SAC": SAC.SAC,
+    "SAC_Giovanni": SAC_Giovanni.SAC,
+    "GRPO": GRPO.GRPO,
+    "CGRPO": CGRPO.CGRPO,
+    "GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
 }
 
 RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
-MAX_EPISODES = int(os.getenv("MAX_EPISODES", "1000" if RUN_MODE == "full" else "60"))
+MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
 MAX_STEPS = int(os.getenv("MAX_STEPS", "1000" if RUN_MODE == "full" else "400"))
 NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
 
@@ -51,7 +50,7 @@ if agent_override:
         raise ValueError(f"Unknown AGENTS requested: {unknown}. Available: {list(AGENT_REGISTRY.keys())}")
     agents = [AGENT_REGISTRY[name] for name in requested]
 else:
-    agents = [TD3.TD3]#, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]#CGRPO.CGRPO]#
+    agents = [CGRPO.CGRPO]#TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
 
 np.random.seed(42) # Set a global seed for reproducibility of the master seeds
 master_seeds = np.random.randint(size=NUM_SEEDS, low=0, high=10000) # Generate random seeds for reproducibility across runs
@@ -84,8 +83,6 @@ for env_name in ENV_NAMES:
     """
     
     if env_name == "CarRacing-v3":
-        env = bf.SkipFrame(env, skip=4) # Apply frame skipping to speed up training by repeating the same action for 4 frames
-        eval_env = bf.SkipFrame(eval_env, skip=4) # Apply the same frame skipping to the evaluation environment for consistency
         env = bf.CarRacingWrapper(env)
         env = bf.CarRacingActionWrapper(env) # Apply the action wrapper to convert continuous actions to discrete for CarRacing-v3a
         eval_env = bf.CarRacingWrapper(eval_env)
@@ -111,14 +108,18 @@ for env_name in ENV_NAMES:
 
         print(f"\n--- Training {algo_name} on {env_name} ---")
 
-        for seed in master_seeds:
+        for seed_idx, seed in enumerate(master_seeds):
+            print(f"\n--- Starting run with seed {seed_idx}/{len(master_seeds)} ---")
+            
             set_seed(seed) # Set the seed for reproducibility for this run
             
             seed_time = time.time()
-            agent = AgentClass(env) # Initialize agent with environment
+            if algo_name == "CGRPO":
+                agent = AgentClass(env, N=5, K=2) # Initialize CGRPO with specific parameters
+            else:
+                agent = AgentClass(env) # Initialize agent with environment
             
             print(f"\n--- Run: {algo_name} | Seed: {seed} ---")
-
 
             eval_rewards = []
 
@@ -136,7 +137,7 @@ for env_name in ENV_NAMES:
                     
                     # For dm_control: treat truncated (time limit) as episode end
                     episode_done = done or truncated
-                    agent.step(state, action, reward, next_state, done)
+                    agent.step(state, action, reward, next_state, episode_done)
 
                     state = next_state
                     # state, ep_reward = next_state, ep_reward + reward
@@ -146,20 +147,19 @@ for env_name in ENV_NAMES:
                 # ==========================================
                 # 2. EVALUATION
                 # ==========================================
-                if ep % 20 == 0:
-                  eval_state, _ = eval_env.reset()
-                  eval_ep_reward = 0
-                  for t in range(MAX_STEPS):
-                      eval_action = agent.select_action(eval_state, evaluate=True) 
-                      eval_state, r, d, trunc, _ = eval_env.step(eval_action)
-                      eval_ep_reward += r
-                      if d or trunc: break
+                eval_state, _ = eval_env.reset()
+                eval_ep_reward = 0
+                for t in range(MAX_STEPS):
+                    eval_action = agent.select_action(eval_state, evaluate=True) 
+                    eval_state, r, d, trunc, _ = eval_env.step(eval_action)
+                    eval_ep_reward += r
+                    if d or trunc: break
 
-                  eval_rewards.append(eval_ep_reward)
+                eval_rewards.append(eval_ep_reward)
 
-                  step_time = time.time() - seed_time
-                  Environment_name = env_name.split("/")[-1] # Extract the environment name for cleaner logging
-                  if ep % 10 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
+                step_time = time.time() - seed_time
+                Environment_name = env_name.split("/")[-1] # Extract the environment name for cleaner logging
+                if ep % 10 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
 
             # Store the rewards under the specific algorithm's name
             all_results[env_name][algo_name].append(eval_rewards)
