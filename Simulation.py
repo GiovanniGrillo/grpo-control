@@ -19,7 +19,7 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # Main Loop
-DEFAULT_ENV_NAMES = ["CarRacing-v3"]#["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
+DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
 AGENT_REGISTRY = {
     "TD3": TD3.TD3,
     "PPO": PPO.PPO,
@@ -48,7 +48,7 @@ if agent_override:
         raise ValueError(f"Unknown AGENTS requested: {unknown}. Available: {list(AGENT_REGISTRY.keys())}")
     agents = [AGENT_REGISTRY[name] for name in requested]
 else:
-    agents = [CGRPO.CGRPO]#TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
+    agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
 
 np.random.seed(42) # Set a global seed for reproducibility of the master seeds
 master_seeds = np.random.randint(size=NUM_SEEDS, low=0, high=10000) # Generate random seeds for reproducibility across runs
@@ -108,7 +108,7 @@ for env_name in ENV_NAMES:
 
         for seed_idx, seed in enumerate(master_seeds):
             print(f"\n--- Starting run with seed {seed_idx}/{len(master_seeds)} ---")
-            
+
             set_seed(seed) # Set the seed for reproducibility for this run
             
             seed_time = time.time()
