@@ -361,3 +361,51 @@ class CGRPO:
         for i in range(self.N):
             self.old_actors[i].load_state_dict(self.actors[i].state_dict())
         self.buffer.clear_buffer()
+
+    def save_checkpoint(self, path, ep, eval_rewards):
+        """
+        Saves the entire population state, including the buffer for the current update cycle.
+        """
+        checkpoint = {
+            'episode': ep,
+            'eval_rewards': eval_rewards,
+            'current_policy_idx': self.current_policy_idx,
+            # Save state_dicts for all actors in the population
+            'actors_state_dict': self.actors.state_dict(),
+            'old_actors_state_dict': self.old_actors.state_dict(),
+            'ref_actor_state_dict': self.ref_actor.state_dict(),
+            # Save all optimizers
+            'optimizers_state_dict': [opt.state_dict() for opt in self.optimizers],
+            # CRITICAL: Save the partial population buffer to resume the update cycle
+            'buffer_data': self.buffer.buffers,
+            'current_episodes': self.current_episodes if hasattr(self, 'current_episodes') else None
+        }
+        torch.save(checkpoint, path)
+
+    def load_checkpoint(self, path):
+        """
+        Loads the population state and resumes the collection cycle.
+        """
+        import os
+        if not os.path.exists(path):
+            return {'episode': 0, 'eval_rewards': []}
+
+        ckpt = torch.load(path, map_location=self.device)
+
+        # Restore population networks
+        self.actors.load_state_dict(ckpt['actors_state_dict'])
+        self.old_actors.load_state_dict(ckpt['old_actors_state_dict'])
+        self.ref_actor.load_state_dict(ckpt['ref_actor_state_dict'])
+
+        # Restore all optimizers
+        for opt, state in zip(self.optimizers, ckpt['optimizers_state_dict']):
+            opt.load_state_dict(state)
+
+        # Restore buffer state and progress index
+        self.current_policy_idx = ckpt['current_policy_idx']
+        self.buffer.buffers = ckpt['buffer_data']
+        
+        if ckpt['current_episodes'] is not None:
+            self.buffer.current_episodes = ckpt['current_episodes']
+
+        return ckpt

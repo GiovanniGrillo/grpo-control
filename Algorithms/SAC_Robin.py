@@ -1,3 +1,4 @@
+import os
 import gymnasium as gym
 import numpy as np
 import torch
@@ -181,3 +182,55 @@ class SAC:
         for t, s_net in zip([self.q1_target, self.q2_target], [self.q1, self.q2]):
             for target_param, param in zip(t.parameters(), s_net.parameters()):
                 target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
+    
+    def save_checkpoint(self, path, ep, eval_rewards):
+        """Saves everything needed to resume training and preserve research data."""
+        checkpoint = {
+            'episode': ep,
+            'eval_rewards': eval_rewards,
+            'total_steps': self.total_steps,
+            'log_alpha': self.log_alpha,
+            # Networks
+            'encoder_state_dict': self.encoder.state_dict(),
+            'actor_state_dict': self.actor.state_dict(),
+            'q1_state_dict': self.q1.state_dict(),
+            'q2_state_dict': self.q2.state_dict(),
+            # Optimizers
+            'q_opt_state_dict': self.q_opt.state_dict(),
+            'actor_opt_state_dict': self.actor_opt.state_dict(),
+            'alpha_opt_state_dict': self.alpha_opt.state_dict(),
+            # Replay Buffer (Crucial for Off-Policy)
+            'buffer': self.memory.buffer 
+        }
+        torch.save(checkpoint, path)
+        # Optional: print(f"Checkpoint saved: {path} (Buffer size: {len(self.memory)})")
+
+    def load_checkpoint(self, path):
+        """Loads the checkpoint and returns the metadata for the simulation loop."""
+        if not os.path.exists(path):
+            return {'episode': 0, 'eval_rewards': []}
+        
+        ckpt = torch.load(path, map_location=self.device)
+        
+        # Restore Networks
+        self.encoder.load_state_dict(ckpt['encoder_state_dict'])
+        self.actor.load_state_dict(ckpt['actor_state_dict'])
+        self.q1.load_state_dict(ckpt['q1_state_dict'])
+        self.q2.load_state_dict(ckpt['q2_state_dict'])
+        
+        # Restore Optimizers
+        self.q_opt.load_state_dict(ckpt['q_opt_state_dict'])
+        self.actor_opt.load_state_dict(ckpt['actor_opt_state_dict'])
+        self.alpha_opt.load_state_dict(ckpt['alpha_opt_state_dict'])
+        
+        # Restore Scalars & Tensors
+        self.log_alpha.data.copy_(ckpt['log_alpha'])
+        self.total_steps = ckpt['total_steps']
+        self.memory.buffer = ckpt['buffer']
+        
+        # Sync Target Networks
+        self.encoder_target.load_state_dict(self.encoder.state_dict())
+        self.q1_target.load_state_dict(self.q1.state_dict())
+        self.q2_target.load_state_dict(self.q2.state_dict())
+        
+        return ckpt # Return full dict so Simulation.py gets 'episode' and 'eval_rewards'

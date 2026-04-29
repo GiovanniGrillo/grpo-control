@@ -10,7 +10,7 @@ import gymnasium as gym
 import utils as bf
 
 class RolloutBuffer:
-    """Speicher für PPO (On-Policy Daten)"""
+    """Save for PPO (On-Policy Data)"""
     def __init__(self):
         self.states, self.actions, self.logprobs = [], [], []
         self.rewards, self.is_terminals, self.values = [], [], []
@@ -20,13 +20,13 @@ class RolloutBuffer:
         del self.rewards[:]; del self.is_terminals[:]; del self.values[:]
 
 class ActorCritic(nn.Module):
-    """Kombiniertes Netzwerk für PPO"""
+    """Combined Network for PPO"""
     def __init__(self, observation_space, action_space, hidden_dim=256):
         super(ActorCritic, self).__init__()
-        # Wir nutzen denselben FeatureExtractor wie bei deinem SAC
+        # Sample feature extractor based on the observation space type
         self.extractor = bf.FeatureExtractor(observation_space)
         
-        # Action Space Typ erkennen
+        # Action Space Type Check: Discrete vs Continuous
         self.is_discrete = isinstance(action_space, gym.spaces.Discrete)
         action_dim = action_space.n if self.is_discrete else action_space.shape[0]
 
@@ -37,7 +37,7 @@ class ActorCritic(nn.Module):
         )
         self.actor_head = nn.Linear(hidden_dim, action_dim)
         
-        # Für kontinuierliche Aktionen brauchen wir eine Standardabweichung
+        # Std for Continuous Actions (if applicable)
         if not self.is_discrete:
             self.action_dim = action_space.shape[0]
             # We handle action_var manually in the PPO class, not as a learned nn.Parameter
@@ -97,7 +97,7 @@ class PPO:
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
-        self.action_std = 0.5            # Initial standard deviation
+        self.action_std = 1            # Initial standard deviation
         self.std_decay_rate = 0.000005   # Linear decay per step
         self.min_std = 0.05              # Minimum noise floor
         
@@ -109,7 +109,7 @@ class PPO:
         self.policy = ActorCritic(env.observation_space, env.action_space, hidden_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         
-        # Kopie für das Update
+        # Copy for the update
         self.policy_old = ActorCritic(env.observation_space, env.action_space, hidden_dim).to(self.device)
         self.policy_old.load_state_dict(self.policy.state_dict())
         
@@ -121,13 +121,13 @@ class PPO:
             action, action_logprob, state_val = self.policy_old.act(state, evaluate=evaluate)
             
             if not evaluate:
-                # PPO muss diese Werte intern speichern
+                # PPO saves values
                 self.buffer.states.append(state)
                 self.buffer.actions.append(action)
                 self.buffer.logprobs.append(action_logprob)
                 self.buffer.values.append(state_val)
 
-            # Umwandlung für Gymnasium
+            # Conversion for Gymnasium
             if self.policy_old.is_discrete:
                 return action.item()
             else:
@@ -155,7 +155,7 @@ class PPO:
         # Decay exploration noise every step
         self.decay_action_std()
 
-        # Führe Update durch, wenn genügend Daten gesammelt wurden
+        # Update the policy if it's time
         if self.time_step % self.update_timestep == 0:
             self.update()
 
@@ -224,3 +224,50 @@ class PPO:
         # Alte Policy updaten & Buffer leeren
         self.policy_old.load_state_dict(self.policy.state_dict())
         self.buffer.clear()
+
+    def save_checkpoint(self, path, ep, eval_rewards):
+        """
+        Saves the current state of the PPO agent.
+        Since PPO is on-policy, we don't need to save the RolloutBuffer.
+        """
+        checkpoint = {
+            'episode': ep,
+            'eval_rewards': eval_rewards,
+            'time_step': self.time_step,
+            'action_std': self.action_std,
+            # Networks
+            'policy_state_dict': self.policy.state_dict(),
+            'policy_old_state_dict': self.policy_old.state_dict(),
+            # Optimizer
+            'optimizer_state_dict': self.optimizer.state_dict(),
+        }
+        torch.save(checkpoint, path)
+        # print(f"PPO Checkpoint saved to {path}")
+
+    def load_checkpoint(self, path):
+        """
+        Loads the agent state from a checkpoint file.
+        Returns the full dictionary to allow the simulation loop to resume.
+        """
+        import os
+        if not os.path.exists(path):
+            return {'episode': 0, 'eval_rewards': []}
+
+        checkpoint = torch.load(path, map_location=self.device)
+
+        # Restore network weights
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
+        self.policy_old.load_state_dict(checkpoint['policy_old_state_dict'])
+        
+        # Restore optimizer state
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+        # Restore exploration parameters and counters
+        self.time_step = checkpoint['time_step']
+        self.action_std = checkpoint['action_std']
+        
+        # Ensure the loaded action_std is applied to the distribution logic
+        self.policy.set_action_std(self.action_std)
+        self.policy_old.set_action_std(self.action_std)
+
+        return checkpoint
