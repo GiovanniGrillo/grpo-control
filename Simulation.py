@@ -9,6 +9,7 @@ import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
+import Algorithms.td3_jax.TD3_jax as TD3_jax
 import time
 import numpy as np
 import Plotting as plot
@@ -29,6 +30,7 @@ AGENT_REGISTRY = {
     "GRPO": GRPO.GRPO,
     "CGRPO": CGRPO.CGRPO,
     "GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
+    "TD3_jax": TD3_jax.TD3,
 }
 
 RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
@@ -51,7 +53,7 @@ if agent_override:
         raise ValueError(f"Unknown AGENTS requested: {unknown}. Available: {list(AGENT_REGISTRY.keys())}")
     agents = [AGENT_REGISTRY[name] for name in requested]
 else:
-    agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
+    agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni, TD3_jax.TD3_jax]
 
 np.random.seed(42) # Set a global seed for reproducibility of the master seeds
 master_seeds = np.random.randint(size=NUM_SEEDS, low=0, high=10000) # Generate random seeds for reproducibility across runs
