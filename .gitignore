@@ -9,6 +9,7 @@ plots/
 *.png
 *.csv
 all_results.json
+checkpoints/
 
 # Virtuelle Umgebungen
 venv/
