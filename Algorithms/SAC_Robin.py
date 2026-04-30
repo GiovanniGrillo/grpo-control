@@ -191,7 +191,6 @@ class SAC:
             'total_steps': self.total_steps,
             'log_alpha': self.log_alpha,
             # Networks
-            'encoder_state_dict': self.encoder.state_dict(),
             'actor_state_dict': self.actor.state_dict(),
             'q1_state_dict': self.q1.state_dict(),
             'q2_state_dict': self.q2.state_dict(),
@@ -213,7 +212,6 @@ class SAC:
         ckpt = torch.load(path, map_location=self.device)
         
         # Restore Networks
-        self.encoder.load_state_dict(ckpt['encoder_state_dict'])
         self.actor.load_state_dict(ckpt['actor_state_dict'])
         self.q1.load_state_dict(ckpt['q1_state_dict'])
         self.q2.load_state_dict(ckpt['q2_state_dict'])
@@ -229,7 +227,6 @@ class SAC:
         self.memory.buffer = ckpt['buffer']
         
         # Sync Target Networks
-        self.encoder_target.load_state_dict(self.encoder.state_dict())
         self.q1_target.load_state_dict(self.q1.state_dict())
         self.q2_target.load_state_dict(self.q2.state_dict())
         

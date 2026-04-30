@@ -10,7 +10,7 @@ import gymnasium as gym
 import utils as bf
 
 class RolloutBuffer:
-    """Save for PPO (On-Policy Data)"""
+    """Speicher für PPO (On-Policy Daten)"""
     def __init__(self):
         self.states, self.actions, self.logprobs = [], [], []
         self.rewards, self.is_terminals, self.values = [], [], []
@@ -20,13 +20,13 @@ class RolloutBuffer:
         del self.rewards[:]; del self.is_terminals[:]; del self.values[:]
 
 class ActorCritic(nn.Module):
-    """Combined Network for PPO"""
+    """Kombiniertes Netzwerk für PPO"""
     def __init__(self, observation_space, action_space, hidden_dim=256):
         super(ActorCritic, self).__init__()
-        # Sample feature extractor based on the observation space type
+        # Wir nutzen denselben FeatureExtractor wie bei deinem SAC
         self.extractor = bf.FeatureExtractor(observation_space)
         
-        # Action Space Type Check: Discrete vs Continuous
+        # Action Space Typ erkennen
         self.is_discrete = isinstance(action_space, gym.spaces.Discrete)
         action_dim = action_space.n if self.is_discrete else action_space.shape[0]
 
@@ -37,11 +37,11 @@ class ActorCritic(nn.Module):
         )
         self.actor_head = nn.Linear(hidden_dim, action_dim)
         
-        # Std for Continuous Actions (if applicable)
+        # Für kontinuierliche Aktionen brauchen wir eine Standardabweichung
         if not self.is_discrete:
             self.action_dim = action_space.shape[0]
             # We handle action_var manually in the PPO class, not as a learned nn.Parameter
-            self.action_var = torch.full((self.action_dim,), 0.5)
+            self.register_buffer('action_var', torch.full((self.action_dim,), 0.5))
 
         # Critic (Value Function)
         self.critic = nn.Sequential(
@@ -52,7 +52,8 @@ class ActorCritic(nn.Module):
     
     def set_action_std(self, std):
         """Manually updates the standard deviation for the action distribution."""
-        self.action_var = torch.full((self.action_dim,), std * std).to(next(self.parameters()).device)
+        if not self.is_discrete:
+            self.action_var.fill_(std * std)
 
 
     def act(self, state, evaluate=False):
@@ -97,7 +98,7 @@ class PPO:
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
-        self.action_std = 1            # Initial standard deviation
+        self.action_std = 0.5            # Initial standard deviation
         self.std_decay_rate = 0.000005   # Linear decay per step
         self.min_std = 0.05              # Minimum noise floor
         
@@ -109,7 +110,7 @@ class PPO:
         self.policy = ActorCritic(env.observation_space, env.action_space, hidden_dim).to(self.device)
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
         
-        # Copy for the update
+        # Kopie für das Update
         self.policy_old = ActorCritic(env.observation_space, env.action_space, hidden_dim).to(self.device)
         self.policy_old.load_state_dict(self.policy.state_dict())
         
@@ -121,13 +122,13 @@ class PPO:
             action, action_logprob, state_val = self.policy_old.act(state, evaluate=evaluate)
             
             if not evaluate:
-                # PPO saves values
+                # PPO muss diese Werte intern speichern
                 self.buffer.states.append(state)
                 self.buffer.actions.append(action)
                 self.buffer.logprobs.append(action_logprob)
                 self.buffer.values.append(state_val)
 
-            # Conversion for Gymnasium
+            # Umwandlung für Gymnasium
             if self.policy_old.is_discrete:
                 return action.item()
             else:
@@ -155,7 +156,7 @@ class PPO:
         # Decay exploration noise every step
         self.decay_action_std()
 
-        # Update the policy if it's time
+        # Führe Update durch, wenn genügend Daten gesammelt wurden
         if self.time_step % self.update_timestep == 0:
             self.update()
 
@@ -203,19 +204,21 @@ class PPO:
 
         # 3. K_epochs of PPO updates
         for _ in range(self.K_epochs):
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
-            state_values = torch.squeeze(state_values)
+            logprobs, current_state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+            current_state_values = torch.squeeze(current_state_values)
             
             # Ratio berechnen (pi_theta / pi_theta__old)
             ratios = torch.exp(logprobs - old_logprobs)
             
-            # Surrogate Loss
-            advantages = rewards - state_values.detach()   
+            # Surrogate Loss 
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
+
+            #critics loss
+            critic_loss = 0.5 * self.MseLoss(current_state_values, returns)
             
             # Finaler Loss
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
+            loss = -torch.min(surr1, surr2) + critic_loss - 0.01 * dist_entropy
             
             self.optimizer.zero_grad()
             loss.mean().backward()

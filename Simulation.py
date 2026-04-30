@@ -59,8 +59,9 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     
     print(f"\n--- Starting run with seed {seed_idx}/{total_seeds} ---")
 
-    ckpt_path = os.path.join(checkpoint_dir, f"{env_name}_{algo_name}_s{seed}_last.pth")
-    final_path = os.path.join(checkpoint_dir, f"{env_name}_{algo_name}_s{seed}_final.pth")
+    safe_env_name = env_name.replace("/", "_")
+    ckpt_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_last.pth")
+    final_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_final.pth")
     
     if algo_name == "CGRPO":
         agent = AgentClass(env, N=20, K=2) # Initialize CGRPO with specific parameters
@@ -156,7 +157,7 @@ if __name__ == '__main__':
     MAX_STEPS = int(os.getenv("MAX_STEPS", "1000" if RUN_MODE == "full" else "400"))
     NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
     RECOVERY = os.getenv("RECOVERY", "false").strip().lower() == "true"
-    Multiprocessing = os.getenv("MULTIPROCESSING", "false").strip().lower() == "true"
+    MULTIPROCESSING = os.getenv("MULTIPROCESSING", "false").strip().lower() == "true"
 
     env_override = os.getenv("ENV_NAMES", "").strip()
     if env_override:
@@ -208,7 +209,7 @@ if __name__ == '__main__':
 
             print(f"\n--- Training {algo_name} on {env_name} ---")
 
-            if Multiprocessing:
+            if MULTIPROCESSING:
                 print(f"\n--- Training {algo_name} on {env_name} (Parallel Seeds) ---")
 
                 args = [
