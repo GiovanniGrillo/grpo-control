@@ -1,0 +1,17 @@
+[
+    {
+        "env": "dm_control/cartpole-swingup-v0",
+        "algo": "CGRPO",
+        "time": 1510.1140813827515
+    },
+    {
+        "env": "dm_control/acrobot-swingup-v0",
+        "algo": "CGRPO",
+        "time": 1283.8189041614532
+    },
+    {
+        "env": "CarRacing-v3",
+        "algo": "CGRPO",
+        "time": 18057.872012853622
+    }
+]

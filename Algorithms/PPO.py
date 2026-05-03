@@ -26,6 +26,8 @@ class ActorCritic(nn.Module):
         # Wir nutzen denselben FeatureExtractor wie bei deinem SAC
         self.extractor = bf.FeatureExtractor(observation_space)
         
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         # Action Space Typ erkennen
         self.is_discrete = isinstance(action_space, gym.spaces.Discrete)
         action_dim = action_space.n if self.is_discrete else action_space.shape[0]
@@ -41,7 +43,7 @@ class ActorCritic(nn.Module):
         if not self.is_discrete:
             self.action_dim = action_space.shape[0]
             # We handle action_var manually in the PPO class, not as a learned nn.Parameter
-            self.action_var = torch.full((self.action_dim,), 0.5)
+            self.action_var = torch.full((self.action_dim,), 0.5).to(self.device)
 
         # Critic (Value Function)
         self.critic = nn.Sequential(
@@ -52,43 +54,46 @@ class ActorCritic(nn.Module):
     
     def set_action_std(self, std):
         """Manually updates the standard deviation for the action distribution."""
-        self.action_var = torch.full((self.action_dim,), std * std).to(next(self.parameters()).device)
-
+        self.action_var = torch.full((self.action_dim,), std * std).to(self.device)
 
     def act(self, state, evaluate=False):
         x = self.extractor(state)
         
         if self.is_discrete:
-            action_logits = self.actor_head(self.actor_base(x))
-            dist = Categorical(logits=action_logits)
-
-            action = torch.argmax(action_logits, dim=-1) if evaluate else dist.sample()
+            logits = self.actor_head(self.actor_base(x))
+            dist = Categorical(logits=logits)
+            action = torch.argmax(logits, dim=-1) if evaluate else dist.sample()
+            logprob = dist.log_prob(action)
         else:
-            action_mean = torch.tanh(self.actor_head(self.actor_base(x)))
-            dist = MultivariateNormal(action_mean, torch.diag(self.action_var))
-
-            action = action_mean if evaluate else dist.sample()
+            mean = self.actor_head(self.actor_base(x))
+            dist = MultivariateNormal(mean, torch.diag(self.action_var))
             
-        action_logprob = dist.log_prob(action)
-        state_val = self.critic(x)
-
-        return action.detach(), action_logprob.detach(), state_val.detach()
+            if evaluate:
+                u = mean
+                action = torch.tanh(u)
+            else:
+                u = dist.sample()
+                action = torch.tanh(u)
+                
+            logprob = dist.log_prob(u) - torch.sum(torch.log(1 - action.pow(2) + 1e-6), dim=-1)
+            
+        val = self.critic(x)
+        return action.detach(), logprob.detach(), val.detach()
 
     def evaluate(self, state, action):
         x = self.extractor(state)
         
         if self.is_discrete:
-            action_logits = self.actor_head(self.actor_base(x))
-            dist = Categorical(logits=action_logits)
+            logits = self.actor_head(self.actor_base(x))
+            dist = Categorical(logits=logits)
+            logprobs = dist.log_prob(action)
         else:
-            action_mean = torch.tanh(self.actor_head(self.actor_base(x)))
-            dist = MultivariateNormal(action_mean, torch.diag(self.action_var))
+            mean = self.actor_head(self.actor_base(x))
+            dist = MultivariateNormal(mean, torch.diag(self.action_var))
+            u = torch.atanh(torch.clamp(action, -0.999, 0.999))
+            logprobs = dist.log_prob(u) - torch.sum(torch.log(1 - action.pow(2) + 1e-6), dim=-1)
             
-        action_logprobs = dist.log_prob(action)
-        dist_entropy = dist.entropy()
-        state_values = self.critic(x)
-        
-        return action_logprobs, state_values, dist_entropy
+        return logprobs, self.critic(x), dist.entropy()
 
 class PPO:
     """Proximal Policy Optimization Agent"""
@@ -97,9 +102,9 @@ class PPO:
         self.gamma = gamma
         self.eps_clip = eps_clip
         self.K_epochs = K_epochs
-        self.action_std = 0.5            # Initial standard deviation
-        self.std_decay_rate = 0.000005   # Linear decay per step
-        self.min_std = 0.05              # Minimum noise floor
+        self.action_std = 1            # Initial standard deviation
+        self.std_decay_rate = 0.00005   # Linear decay per step
+        self.min_std = 0.005              # Minimum noise floor
         
         self.update_timestep = update_timestep
         self.time_step = 0
@@ -159,7 +164,7 @@ class PPO:
         if self.time_step % self.update_timestep == 0:
             self.update()
 
-    def update(self):
+    def update(self, entropy_coef=0.05):
         """
         Updates the policy using the collected rollout buffer.
         Implements Generalized Advantage Estimation (GAE) for variance reduction.
@@ -193,7 +198,7 @@ class PPO:
             
         # Returns (Targets for the Critic) = Advantages + V(s)
         returns = advantages + state_values
-
+        
         # Standardizing advantages is CRUCIAL for PPO stability
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
 
@@ -202,20 +207,25 @@ class PPO:
         old_logprobs = torch.stack(self.buffer.logprobs, dim=0).squeeze(1).detach()
 
         # 3. K_epochs of PPO updates
-        for _ in range(self.K_epochs):
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+        batch_size = 64
+        indices = torch.randperm(len(old_states))
+        for start in range(0, len(old_states), batch_size):
+            batch_idx = indices[start:start+batch_size]
+            batch_states = old_states[batch_idx]
+            batch_actions = old_actions[batch_idx]
+            
+            logprobs, state_values, dist_entropy = self.policy.evaluate(batch_states, batch_actions)
             state_values = torch.squeeze(state_values)
             
-            # Ratio berechnen (pi_theta / pi_theta__old)
+            # Ratio berechnen
             ratios = torch.exp(logprobs - old_logprobs)
             
-            # Surrogate Loss
-            advantages = rewards - state_values.detach()   
-            surr1 = ratios * advantages
+            # Surrogate Loss - NUTZE DIE GAE ADVANTAGES VON OBEN
+            surr1 = ratios * advantages # <--- Hier die GAE-Variable nutzen!
             surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
             
-            # Finaler Loss
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
+            # Critic Loss: Nutze die GAE-'returns' statt der rohen 'rewards'
+            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, returns) - entropy_coef * dist_entropy
             
             self.optimizer.zero_grad()
             loss.mean().backward()

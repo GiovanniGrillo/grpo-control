@@ -1,0 +1,12 @@
+[
+    {
+        "env": "dm_control/cartpole-swingup-v0",
+        "algo": "SAC",
+        "time": 12778.377242803574
+    },
+    {
+        "env": "dm_control/acrobot-swingup-v0",
+        "algo": "SAC",
+        "time": 12603.051993608475
+    }
+]
