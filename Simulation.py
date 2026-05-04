@@ -9,6 +9,7 @@ import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
+import Algorithms.PPO as PPO
 import time
 import numpy as np
 import Plotting as plot
