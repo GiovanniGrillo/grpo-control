@@ -4,7 +4,8 @@ import torch.optim as optim
 import gymnasium as gym
 import numpy as np
 from copy import deepcopy
-from sklearn.cluster import KMeans, DBSCAN, HDBSCAN
+from sklearn.cluster import KMeans
+from hdbscan import HDBSCAN
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
@@ -70,9 +71,9 @@ class Actor(nn.Module):
 
 class CGRPO:
     """Continuous Group Relative Policy Optimization"""
-    def __init__(self, env, seed = 42, hidden_dim=256, lr=3e-4, N=10, K=2, epsilon=0.2, 
-                 tau=0.5, lam_s=0.01, lam_d=0.01, gamma=0.99, 
-                 dbscan_eps=0.4):#, dbscan_min_samples=10, dbscan_cluster_size=150):
+    def __init__(self, env, seed = 42, hidden_dim=256, lr=5e-4, N=20, K=2, epsilon=0.2, 
+                 tau=0.6, lam_s=0.01, lam_d=0.00001, gamma=0.99, 
+                 dbscan_eps: float = 0.4): # tau = 0.5, lam_s = 0.01, lam_d = 0.00001, dbscan_eps = 0.4
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
         self.N = N 
@@ -184,7 +185,7 @@ class CGRPO:
             # Raw returns and Features for ranking and clustering
             ret = sum(traj["reward"])
             all_returns.append(ret)
-            feat_stack = torch.stack(traj["feature"]).numpy()
+            feat_stack = torch.stack(traj["feature"]).cpu().numpy()
             all_features_np.append(feat_stack)
 
         # Policy Clustering based on phi_i
@@ -206,17 +207,27 @@ class CGRPO:
         all_states_scaled = scaler.fit_transform(all_states_flat)
 
         # Reduce to 2D for visualization using PCA
-        pca_clustering = PCA(n_components=min(10, all_states_flat.shape[1])) # Keep enough components to retain most variance for clustering
+        pca_comps = min(50, all_states_flat.shape[1]) 
+        pca_clustering = PCA(n_components=pca_comps) # Keep enough components to retain most variance for clustering
         all_states_pca = pca_clustering.fit_transform(all_states_scaled) # Apply PCA to the scaled features for better clustering performance and visualization (reducing dimensionality while retaining most of the
+
+        all_states_pca = np.nan_to_num(
+            all_states_pca, 
+            nan=0.0, 
+            posinf=0.0, 
+            neginf=0.0
+        ).astype(np.float64)
+        # jitter = np.random.normal(0, 1e-6, all_states_pca.shape)
+        # all_states_pca += jitter
 
         # DBSCAN parameters
         total_points = all_states_pca.shape[0]
-        dynamic_cluster_size = max(50, int(total_points * 0.01)) 
-        dynamic_min_samples = max(10, int(dynamic_cluster_size / 5))
+        dynamic_cluster_size = int(max(50, total_points * 0.01))
+        dynamic_min_samples = int(max(10, dynamic_cluster_size / 5)) # 10 & 5
 
         #dbscan = DBSCAN(eps=self.dbscan_eps, min_samples=self.dbscan_min_samples).fit(all_states_flat) # Cluster states into contexts based on their latent features using DBSCAN
         # dbscan = HDBSCAN(min_cluster_size=self.dbscan_cluster_size, min_samples = self.dbscan_min_samples, cluster_selection_epsilon = 0.5,copy = True) # Cluster states into contexts based on their latent features using DBSCAN
-        dbscan = HDBSCAN(min_cluster_size=dynamic_cluster_size, min_samples = dynamic_min_samples, cluster_selection_epsilon = self.dbscan_eps,copy = True) # Cluster states into contexts based on their latent features using DBSCAN
+        dbscan = HDBSCAN(min_cluster_size=int(dynamic_cluster_size), min_samples=int(dynamic_min_samples), cluster_selection_epsilon=float(self.dbscan_eps), core_dist_n_jobs=1)
 
         #global_labels = dbscan.labels_                                                          # Cluster labels for each state in the flattened feature array
         global_labels = dbscan.fit_predict(all_states_pca) # Cluster states into contexts based on their PCA-reduced features using HDBSCAN (this often gives better clusters in high-dimensional spaces)
@@ -277,6 +288,12 @@ class CGRPO:
                 advantages[t] = policy_returns[t] - cluster_means[label.item()]                       # Calculate advantage for this time step by subtracting the cluster mean return from the return-to-go
             all_advantages.append(advantages)                                                         # Store the calculated advantages for this policy's trajectory                                                         
 
+        # Check nach der Schleife, die all_advantages füllt
+        #all_adv_concat = torch.cat(all_advantages)
+        #print(f"--- ADVANTAGE CHECK ---")
+        #print(f"Mean: {all_adv_concat.mean().item():.4f}") # Sollte nahe 0 sein
+        #print(f"Std:  {all_adv_concat.std().item():.4f}")  # Sollte nicht explodieren
+        #print(f"Min:  {all_adv_concat.min().item():.4f} | Max: {all_adv_concat.max().item():.4f}")
 
         # Group Normalization
         normalized_advantages = [None] * self.N                                                         # Initialize list to hold normalized advantages for each policy
@@ -337,16 +354,20 @@ class CGRPO:
             # Diversity Regularization (L_diversity)
             l_diversity = torch.tensor(0.0).to(self.device)                                             # Initialize diversity regularization term
             if self.lam_d > 0:                                                                          # Only calculate diversity regularization if lambda_d is greater than 0
-                mu_i_avg = dist.mean.mean(dim=0, keepdim=True)                                             # Mean action of the current policy i (used for diversity regularization)
+                mu_i_avg = dist.mean.mean(dim=0)                                             # Mean action of the current policy i (used for diversity regularization)
                 for j in range(self.N):
                     if i == j:
                         continue
-                    mu_j_avg = all_mus[j].mean(dim=0, keepdim=True)                                                                   # Mean action of policy j
-                    cos_sim = torch.cosine_similarity(mu_i_avg, mu_j_avg, dim=-1)                      # Calculate cosine similarity between the mean actions of policy i and policy j
-                    l_diversity += torch.max(torch.tensor(0.0).to(self.device), cos_sim - self.tau)     # Diversity regularization to encourage different policies to explore different strategies (penalize high similarity above a threshold tau)
+                    mu_j_avg = all_mus[j].mean(dim=0)                                                                   # Mean action of policy j
+                    cos_sim = torch.cosine_similarity(mu_i_avg.view(1, -1), mu_j_avg.view(1, -1), dim=-1)                      # Calculate cosine similarity between the mean actions of policy i and policy j
+                    reg_term = torch.clamp(cos_sim - self.tau, min=0.0)                                                           # Calculate the regularization term based on cosine similarity and the threshold tau
+                    l_diversity += reg_term.mean()     # Diversity regularization to encourage different policies to explore different strategies (penalize high similarity above a threshold tau)
+            l_diversity = l_diversity / (self.N * (self.N - 1))
 
             # Total Loss Zusammenführung
             loss = actor_loss + self.lam_s * l_smooth + self.lam_d * l_diversity   # Combine all loss components into the final loss for this policy update
+
+            # print(f"Losses - Actor: {actor_loss.item():.4f}, Smooth: {l_smooth.item():.4f}, Div: {l_diversity.item():.4f}")
 
             # Optimization
             self.optimizers[i].zero_grad()
