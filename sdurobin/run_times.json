@@ -3,5 +3,60 @@
         "env": "CarRacing-v3",
         "algo": "SAC",
         "time": 26556.92770433426
+    },
+    {
+        "env": "dm_control/cartpole-swingup-v0",
+        "algo": "PPO",
+        "time": 3397.341301202774
+    },
+    {
+        "env": "dm_control/acrobot-swingup-v0",
+        "algo": "PPO",
+        "time": 3410.434433698654
+    },
+    {
+        "env": "dm_control/cartpole-swingup-v0",
+        "algo": "PPO",
+        "time": 2209.1932985782623
+    },
+    {
+        "env": "dm_control/acrobot-swingup-v0",
+        "algo": "PPO",
+        "time": 2204.40758728981
+    },
+    {
+        "env": "CarRacing-v3",
+        "algo": "PPO",
+        "time": 5477.181939125061
+    },
+    {
+        "env": "dm_control/cartpole-swingup-v0",
+        "algo": "PPO",
+        "time": 3139.3440039157867
+    },
+    {
+        "env": "dm_control/acrobot-swingup-v0",
+        "algo": "PPO",
+        "time": 3133.6633729934692
+    },
+    {
+        "env": "CarRacing-v3",
+        "algo": "PPO",
+        "time": 6512.166999101639
+    },
+    {
+        "env": "dm_control/cartpole-swingup-v0",
+        "algo": "PPO",
+        "time": 2192.5518288612366
+    },
+    {
+        "env": "dm_control/acrobot-swingup-v0",
+        "algo": "PPO",
+        "time": 2204.2673439979553
+    },
+    {
+        "env": "CarRacing-v3",
+        "algo": "PPO",
+        "time": 5590.134731292725
     }
 ]

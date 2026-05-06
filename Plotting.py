@@ -129,8 +129,13 @@ def plot_data(folder="plots", filename="all_results.json", plot_name = "learning
         for algo_name, runs in algos.items():
             # 'runs' is a list of lists (e.g., 5 seeds x 100 episodes).
             # Convert to a 2D numpy array for efficient vector operations.
-            runs_array = np.array(runs) 
+            #print(runs.shape)
+
+            trimmed_runs = [run[:500] for run in runs]
             
+            runs_array = np.array(trimmed_runs)
+            
+
             if runs_array.ndim == 1:
                 # If only one run is present
                 mean_across_seeds = runs_array
