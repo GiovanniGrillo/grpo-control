@@ -1,4 +1,3 @@
-# time_logger.py
 import json
 import os
 
@@ -6,6 +5,15 @@ class TimeTracker:
     def __init__(self, filename="run_times.json"):
         self.filename = filename
         self.data = []
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, 'r') as f:
+                    self.data = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                self.data = []
 
     def log(self, env_name, algo_name, run_time):
         self.data.append({

@@ -1,276 +1,251 @@
-# =========================================================================================
-# PPO Agent Implementation
-# =========================================================================================
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Categorical, MultivariateNormal
+from torch.distributions import Normal, Categorical
 import gymnasium as gym
+import numpy as np
 import utils as bf
+import os
+
+# =========================================================================================
+# ObjectRL-Style PPO Agent
+# Features: Disjoint Actor/Critic Networks, Learnable Standard Deviation (LogStd), GAE
+# =========================================================================================
 
 class RolloutBuffer:
-    """Speicher für PPO (On-Policy Daten)"""
+    """Storage for PPO on-policy data."""
     def __init__(self):
         self.states, self.actions, self.logprobs = [], [], []
         self.rewards, self.is_terminals, self.values = [], [], []
 
     def clear(self):
+        """Clears all stored rollout data."""
         del self.states[:]; del self.actions[:]; del self.logprobs[:]
         del self.rewards[:]; del self.is_terminals[:]; del self.values[:]
 
-class ActorCritic(nn.Module):
-    """Kombiniertes Netzwerk für PPO"""
-    def __init__(self, observation_space, action_space, hidden_dim=256):
-        super(ActorCritic, self).__init__()
-        # Wir nutzen denselben FeatureExtractor wie bei deinem SAC
-        self.extractor = bf.FeatureExtractor(observation_space)
-        
-        # Action Space Typ erkennen
+class PPOActorNet(nn.Module):
+    """Separate Actor network with a learnable log-standard deviation for PPO."""
+    def __init__(self, obs_space, action_space, hidden_dim=256):
+        super(PPOActorNet, self).__init__()
+        # Use the provided feature extractor
+        self.extractor = bf.FeatureExtractor(obs_space)
         self.is_discrete = isinstance(action_space, gym.spaces.Discrete)
-        action_dim = action_space.n if self.is_discrete else action_space.shape[0]
+        self.action_dim = action_space.n if self.is_discrete else action_space.shape[0]
 
-        # Actor (Policy)
-        self.actor_base = nn.Sequential(
+        # Actor architecture (similar to MLP in ObjectRL)
+        self.arch = nn.Sequential(
             nn.Linear(self.extractor.feature_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU()
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, self.action_dim)
         )
-        self.actor_head = nn.Linear(hidden_dim, action_dim)
-        
-        # Für kontinuierliche Aktionen brauchen wir eine Standardabweichung
-        if not self.is_discrete:
-            self.action_dim = action_space.shape[0]
-            # We handle action_var manually in the PPO class, not as a learned nn.Parameter
-            self.register_buffer('action_var', torch.full((self.action_dim,), 0.5))
 
-        # Critic (Value Function)
-        self.critic = nn.Sequential(
+        if not self.is_discrete:
+            # Learnable parameter for standard deviation (ObjectRL Style)
+            self.action_logstd = nn.Parameter(torch.zeros(self.action_dim))
+            self.upper_clamp = 1.0  # Prevents variance explosion
+
+    def forward(self, state, action=None, is_training=True):
+        feats = self.extractor(state)
+        out = self.arch(feats)
+
+        if self.is_discrete:
+            dist = Categorical(logits=out)
+        else:
+            # Tanh bounds output for environments like CarRacing, scaled afterwards
+            action_mean = torch.tanh(out)
+            # Clamp and expand the learnable logstd
+            action_logstd = self.action_logstd.clamp(max=self.upper_clamp).expand_as(action_mean)
+            action_std = torch.exp(action_logstd)
+            # Create a normal distribution with the mean and standard deviation
+            dist = Normal(loc=action_mean, scale=action_std)
+
+        # Sample action if not provided (during rollout)
+        if action is None:
+            if is_training:
+                action = dist.sample()
+            else:
+                # Use mode/mean for evaluation
+                action = torch.argmax(out, dim=-1) if self.is_discrete else action_mean
+
+        logprob = dist.log_prob(action)
+        # Sum logprobs over action dimensions for continuous spaces
+        if not self.is_discrete:
+            logprob = logprob.sum(dim=-1)
+
+        return action, logprob, dist.entropy()
+
+class PPOCriticNet(nn.Module):
+    """Separate Critic network (Value Function) for disjoint architecture."""
+    def __init__(self, obs_space, hidden_dim=256):
+        super(PPOCriticNet, self).__init__()
+        # Dedicated feature extractor! (Disjoint Networks)
+        self.extractor = bf.FeatureExtractor(obs_space)
+        
+        self.net = nn.Sequential(
             nn.Linear(self.extractor.feature_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
-    
-    def set_action_std(self, std):
-        """Manually updates the standard deviation for the action distribution."""
-        if not self.is_discrete:
-            self.action_var.fill_(std * std)
 
-
-    def act(self, state, evaluate=False):
-        x = self.extractor(state)
-        
-        if self.is_discrete:
-            action_logits = self.actor_head(self.actor_base(x))
-            dist = Categorical(logits=action_logits)
-
-            action = torch.argmax(action_logits, dim=-1) if evaluate else dist.sample()
-        else:
-            action_mean = torch.tanh(self.actor_head(self.actor_base(x)))
-            dist = MultivariateNormal(action_mean, torch.diag(self.action_var))
-
-            action = action_mean if evaluate else dist.sample()
-            
-        action_logprob = dist.log_prob(action)
-        state_val = self.critic(x)
-
-        return action.detach(), action_logprob.detach(), state_val.detach()
-
-    def evaluate(self, state, action):
-        x = self.extractor(state)
-        
-        if self.is_discrete:
-            action_logits = self.actor_head(self.actor_base(x))
-            dist = Categorical(logits=action_logits)
-        else:
-            action_mean = torch.tanh(self.actor_head(self.actor_base(x)))
-            dist = MultivariateNormal(action_mean, torch.diag(self.action_var))
-            
-        action_logprobs = dist.log_prob(action)
-        dist_entropy = dist.entropy()
-        state_values = self.critic(x)
-        
-        return action_logprobs, state_values, dist_entropy
+    def forward(self, state):
+        # Squeeze the last dimension to match reward shape
+        return self.net(self.extractor(state)).squeeze(-1)
 
 class PPO:
-    """Proximal Policy Optimization Agent"""
-    def __init__(self, env, hidden_dim=256, lr=3e-4, gamma=0.99, K_epochs=4, eps_clip=0.2, update_timestep=2000):
+    """Proximal Policy Optimization following the ObjectRL structure."""
+    def __init__(self, env, hidden_dim=256, lr_actor=3e-4, lr_critic=1e-3, 
+                 gamma=0.99, gae_lambda=0.95, clip_rate=0.2, entropy_coef=0.01, 
+                 update_timestep=4000, K_epochs=10, batch_size=256):
+                 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.gamma = gamma
-        self.eps_clip = eps_clip
-        self.K_epochs = K_epochs
-        self.action_std = 0.5            # Initial standard deviation
-        self.std_decay_rate = 0.000005   # Linear decay per step
-        self.min_std = 0.05              # Minimum noise floor
-        
+        self.gae_lambda = gae_lambda
+        self.clip_rate = clip_rate
+        self.entropy_coef = entropy_coef
         self.update_timestep = update_timestep
+        self.K_epochs = K_epochs
+        self.batch_size = batch_size
         self.time_step = 0
         
         self.buffer = RolloutBuffer()
         
-        self.policy = ActorCritic(env.observation_space, env.action_space, hidden_dim).to(self.device)
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
+        # Initialize separate networks
+        self.actor = PPOActorNet(env.observation_space, env.action_space, hidden_dim).to(self.device)
+        self.critic = PPOCriticNet(env.observation_space, hidden_dim).to(self.device)
         
-        # Kopie für das Update
-        self.policy_old = ActorCritic(env.observation_space, env.action_space, hidden_dim).to(self.device)
-        self.policy_old.load_state_dict(self.policy.state_dict())
+        # Create a copy of the actor for calculating PPO ratios
+        self.actor_old = PPOActorNet(env.observation_space, env.action_space, hidden_dim).to(self.device)
+        self.actor_old.load_state_dict(self.actor.state_dict())
         
-        self.MseLoss = nn.MSELoss()
+        # Initialize separate optimizers
+        self.actor_optim = optim.Adam(self.actor.parameters(), lr=lr_actor)
+        self.critic_optim = optim.Adam(self.critic.parameters(), lr=lr_critic)
 
     def select_action(self, state, evaluate=False):
+        """Selects an action based on the current policy."""
         with torch.no_grad():
-            state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            action, action_logprob, state_val = self.policy_old.act(state, evaluate=evaluate)
+            state_t = torch.FloatTensor(state).to(self.device).unsqueeze(0)
+            action, logprob, _ = self.actor_old(state_t, is_training=not evaluate)
+            value = self.critic(state_t)
             
             if not evaluate:
-                # PPO muss diese Werte intern speichern
-                self.buffer.states.append(state)
+                self.buffer.states.append(state_t)
                 self.buffer.actions.append(action)
-                self.buffer.logprobs.append(action_logprob)
-                self.buffer.values.append(state_val)
+                self.buffer.logprobs.append(logprob)
+                self.buffer.values.append(value)
 
-            # Umwandlung für Gymnasium
-            if self.policy_old.is_discrete:
+            if self.actor.is_discrete:
                 return action.item()
             else:
                 return action.cpu().numpy()[0]
 
-    def decay_action_std(self):
-        """
-        Linearly decreases the action noise (std) over time.
-        Ensures the agent becomes more precise as training progresses.
-        """
-        self.action_std -= self.std_decay_rate
-        if self.action_std < self.min_std:
-            self.action_std = self.min_std
-        
-        # Sync the new std with the policy networks
-        self.policy.set_action_std(self.action_std)
-        self.policy_old.set_action_std(self.action_std)
-
     def step(self, state, action, reward, next_state, done):
-        """Wird aufgerufen, um das Feedback der Umgebung zu speichern"""
+        """Processes one environment step and triggers updates if necessary."""
         self.time_step += 1
         self.buffer.rewards.append(reward)
         self.buffer.is_terminals.append(done)
 
-        # Decay exploration noise every step
-        self.decay_action_std()
-
-        # Führe Update durch, wenn genügend Daten gesammelt wurden
+        # Trigger learning when the update timestep is reached
         if self.time_step % self.update_timestep == 0:
-            self.update()
+            with torch.no_grad():
+                next_state_t = torch.FloatTensor(next_state).to(self.device).unsqueeze(0)
+                next_value = self.critic(next_state_t)
+            self.learn(next_value)
 
-    def update(self):
-        """
-        Updates the policy using the collected rollout buffer.
-        Implements Generalized Advantage Estimation (GAE) for variance reduction.
-        """
-        # 1. Convert buffer lists to tensors
+    def learn(self, next_value):
+        """Learns from experience memory using PPO update rules and GAE."""
+        # 1. Prepare Tensors
         rewards = torch.tensor(self.buffer.rewards, dtype=torch.float32).to(self.device)
         is_terminals = torch.tensor(self.buffer.is_terminals, dtype=torch.float32).to(self.device)
-        # values: V(s) predicted by the critic during the rollout
-        state_values = torch.stack(self.buffer.values).squeeze().detach()
         
+        old_states = torch.cat(self.buffer.states, dim=0).detach()
+        old_actions = torch.cat(self.buffer.actions, dim=0).detach()
+        old_logprobs = torch.cat(self.buffer.logprobs, dim=0).detach()
+        values = torch.cat(self.buffer.values, dim=0).detach()
+
+        # 2. Generalized Advantage Estimation (GAE)
         advantages = torch.zeros_like(rewards).to(self.device)
-        gae_lambda = 0.95  # Standard GAE smoothing parameter
         last_gae_lam = 0
-        
-        # 2. Backward pass to compute GAE
-        # We iterate backwards because A_t depends on A_{t+1}
+        next_v = next_value.item()
+
         for t in reversed(range(len(rewards))):
-            if t == len(rewards) - 1:
-                # If the buffer ends, we assume next_value is 0 or bootstrap if necessary
-                next_value = 0 
-                next_non_terminal = 1.0 - is_terminals[t]
-            else:
-                next_value = state_values[t+1]
-                next_non_terminal = 1.0 - is_terminals[t]
+            next_non_terminal = 1.0 - is_terminals[t]
+            delta = rewards[t] + self.gamma * next_v * next_non_terminal - values[t]
+            advantages[t] = last_gae_lam = delta + self.gamma * self.gae_lambda * next_non_terminal * last_gae_lam
+            next_v = values[t]
 
-            # TD-error (delta): r + gamma * V(s_next) - V(s)
-            delta = rewards[t] + self.gamma * next_value * next_non_terminal - state_values[t]
-            
-            # Recursive GAE calculation: A_t = delta + gamma * lambda * A_{t+1}
-            advantages[t] = last_gae_lam = delta + self.gamma * gae_lambda * next_non_terminal * last_gae_lam
-            
-        # Returns (Targets for the Critic) = Advantages + V(s)
-        returns = advantages + state_values
+        returns = advantages + values
+        # Normalize Advantages for stability
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        # Standardizing advantages is CRUCIAL for PPO stability
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
-
-        old_states = torch.stack(self.buffer.states, dim=0).squeeze(1).detach()
-        old_actions = torch.stack(self.buffer.actions, dim=0).squeeze(1).detach()
-        old_logprobs = torch.stack(self.buffer.logprobs, dim=0).squeeze(1).detach()
-
-        # 3. K_epochs of PPO updates
+        dataset_size = old_states.size(0)
+        
+        # 3. Optimization using Mini-Batches
         for _ in range(self.K_epochs):
-            logprobs, current_state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
-            current_state_values = torch.squeeze(current_state_values)
+            indices = np.arange(dataset_size)
+            np.random.shuffle(indices)
             
-            # Ratio berechnen (pi_theta / pi_theta__old)
-            ratios = torch.exp(logprobs - old_logprobs)
-            
-            # Surrogate Loss 
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1-self.eps_clip, 1+self.eps_clip) * advantages
+            for start in range(0, dataset_size, self.batch_size):
+                end = start + self.batch_size
+                batch_idx = indices[start:end]
 
-            #critics loss
-            critic_loss = 0.5 * self.MseLoss(current_state_values, returns)
-            
-            # Finaler Loss
-            loss = -torch.min(surr1, surr2) + critic_loss - 0.01 * dist_entropy
-            
-            self.optimizer.zero_grad()
-            loss.mean().backward()
-            self.optimizer.step()
-            
-        # Alte Policy updaten & Buffer leeren
-        self.policy_old.load_state_dict(self.policy.state_dict())
+                # Evaluate current policy on the mini-batch
+                _, new_logprobs, entropy = self.actor(old_states[batch_idx], old_actions[batch_idx])
+                
+                if not self.actor.is_discrete:
+                    entropy = entropy.sum(dim=-1)
+
+                # Calculate ratio: exp(log(pi) - log(pi_old))
+                ratio = torch.exp(new_logprobs - old_logprobs[batch_idx])
+                
+                # Calculate clipped surrogate loss
+                surr1 = ratio * advantages[batch_idx]
+                surr2 = torch.clamp(ratio, 1.0 - self.clip_rate, 1.0 + self.clip_rate) * advantages[batch_idx]
+                
+                # Combine actor loss with entropy regularization
+                actor_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy.mean()
+                
+                # Perform actor update
+                self.actor_optim.zero_grad()
+                actor_loss.backward()
+                nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5) # Gradient clipping
+                self.actor_optim.step()
+
+                # Calculate and perform critic update (Separate Network)
+                current_values = self.critic(old_states[batch_idx])
+                critic_loss = nn.MSELoss()(current_values, returns[batch_idx])
+                
+                self.critic_optim.zero_grad()
+                critic_loss.backward()
+                nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5) # Gradient clipping
+                self.critic_optim.step()
+
+        # Update the old policy and clear the rollout buffer
+        self.actor_old.load_state_dict(self.actor.state_dict())
         self.buffer.clear()
 
     def save_checkpoint(self, path, ep, eval_rewards):
-        """
-        Saves the current state of the PPO agent.
-        Since PPO is on-policy, we don't need to save the RolloutBuffer.
-        """
+        """Saves current state for recovery."""
         checkpoint = {
             'episode': ep,
             'eval_rewards': eval_rewards,
             'time_step': self.time_step,
-            'action_std': self.action_std,
-            # Networks
-            'policy_state_dict': self.policy.state_dict(),
-            'policy_old_state_dict': self.policy_old.state_dict(),
-            # Optimizer
-            'optimizer_state_dict': self.optimizer.state_dict(),
+            'actor_state_dict': self.actor.state_dict(),
+            'critic_state_dict': self.critic.state_dict(),
+            'actor_optim_state_dict': self.actor_optim.state_dict(),
+            'critic_optim_state_dict': self.critic_optim.state_dict(),
         }
         torch.save(checkpoint, path)
-        # print(f"PPO Checkpoint saved to {path}")
 
     def load_checkpoint(self, path):
-        """
-        Loads the agent state from a checkpoint file.
-        Returns the full dictionary to allow the simulation loop to resume.
-        """
-        import os
+        """Loads state from file for recovery."""
         if not os.path.exists(path):
             return {'episode': 0, 'eval_rewards': []}
-
         checkpoint = torch.load(path, map_location=self.device)
-
-        # Restore network weights
-        self.policy.load_state_dict(checkpoint['policy_state_dict'])
-        self.policy_old.load_state_dict(checkpoint['policy_old_state_dict'])
-        
-        # Restore optimizer state
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
-        # Restore exploration parameters and counters
+        self.actor.load_state_dict(checkpoint['actor_state_dict'])
+        self.actor_old.load_state_dict(checkpoint['actor_state_dict'])
+        self.critic.load_state_dict(checkpoint['critic_state_dict'])
+        self.actor_optim.load_state_dict(checkpoint['actor_optim_state_dict'])
+        self.critic_optim.load_state_dict(checkpoint['critic_optim_state_dict'])
         self.time_step = checkpoint['time_step']
-        self.action_std = checkpoint['action_std']
-        
-        # Ensure the loaded action_std is applied to the distribution logic
-        self.policy.set_action_std(self.action_std)
-        self.policy_old.set_action_std(self.action_std)
-
         return checkpoint

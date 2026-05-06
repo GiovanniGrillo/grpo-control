@@ -9,6 +9,7 @@ import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
+import Algorithms.PPO as PPO
 import time
 import numpy as np
 import Plotting as plot
@@ -18,8 +19,8 @@ import time_logger as tl
 import torch.multiprocessing as mp
 
 import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Helper functions
 
 def set_seed(seed: int):
@@ -46,6 +47,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     eval_env = gym.make(env_name, max_episode_steps=MAX_STEPS)
 
     if env_name == "CarRacing-v3":
+        env = bf.SkipFrame(env, skip=4) # Apply frame skipping to speed up training for CarRacing-v3
         env = bf.CarRacingWrapper(env)
         env = bf.CarRacingActionWrapper(env) # Apply the action wrapper to convert continuous actions to discrete for CarRacing-v3a
         eval_env = bf.CarRacingWrapper(eval_env)
@@ -133,7 +135,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
 
 # Main Loop
 if __name__ == '__main__':
-    # Verhindert Segfaults bei CUDA + Multiprocessing
+    
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:
@@ -142,6 +144,11 @@ if __name__ == '__main__':
     tracker = tl.TimeTracker(filename=os.path.join("plots", "run_times.json"))
 
     DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
+    ENVS_REGISTRY = {
+        "dm_control/cartpole-swingup-v0": "Cartpole",
+        "dm_control/acrobot-swingup-v0": "Acrobot",
+        "CarRacing-v3": "CarRacing",
+    }
     AGENT_REGISTRY = {
         "TD3": TD3.TD3,
         "PPO": PPO.PPO,
@@ -159,9 +166,19 @@ if __name__ == '__main__':
     RECOVERY = os.getenv("RECOVERY", "false").strip().lower() == "true"
     MULTIPROCESSING = os.getenv("MULTIPROCESSING", "false").strip().lower() == "true"
 
+    SHORT_TO_FULL = {v.lower(): k for k, v in ENVS_REGISTRY.items()}
+
     env_override = os.getenv("ENV_NAMES", "").strip()
+
     if env_override:
-        ENV_NAMES = [name.strip() for name in env_override.split(",") if name.strip()]
+        requested = [name.strip() for name in env_override.split(",") if name.strip()]
+        
+        ENV_NAMES = []
+        for r in requested:
+            if r.lower() in SHORT_TO_FULL:
+                ENV_NAMES.append(SHORT_TO_FULL[r.lower()])
+            else:
+                ENV_NAMES.append(r)
     else:
         ENV_NAMES = DEFAULT_ENV_NAMES
 

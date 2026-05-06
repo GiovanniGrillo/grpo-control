@@ -4,14 +4,23 @@ __pycache__/
 *.pyo
 *.pyd
 
+Algorithms/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
 # Daten & Ergebnisse (damit dein GitHub nicht platzt)
 plots/
 *.png
 *.csv
 *.json
 all_results.json
+
 checkpoints/
 *.pth
+*.ipynb
+
 
 # Virtuelle Umgebungen
 venv/
@@ -25,3 +34,5 @@ Thumbs.db
 *.bak
 *.backup
 /backups/
+
+Test.ipynb
