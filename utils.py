@@ -108,7 +108,7 @@ class CarRacingWrapper(gym.ObservationWrapper):
 
 class SkipFrame(gym.Wrapper):
     """
-    Skips frames to speed up training. 
+    Skips frames to speed up training.
     The agent chooses an action, and we repeat it for 'skip' frames, summing the reward.
     """
     def __init__(self, env, skip=4):
@@ -119,11 +119,89 @@ class SkipFrame(gym.Wrapper):
         total_reward = 0.0
         terminated = False
         truncated = False
-        
+
         for _ in range(self._skip):
             obs, reward, terminated, truncated, info = self.env.step(action)
             total_reward += reward
             if terminated or truncated:
                 break
-                
+
         return obs, total_reward, terminated, truncated, info
+
+
+class PopulationBuffer:
+    def __init__(self, N):
+        self.N = N
+        self.buffers = [[] for _ in range(N)]
+        self.current_episodes = [self._init_empty_episode() for _ in range(N)]
+
+    def _init_empty_episode(self):
+        return {"obs": [], "feature": [], "action": [], "log_probs": [], "reward": []}
+
+    def add(self, policy_idx, obs, feature, action, log_prob, reward):
+        self.current_episodes[policy_idx]["obs"].append(obs)
+        self.current_episodes[policy_idx]["feature"].append(feature)
+        self.current_episodes[policy_idx]["action"].append(action)
+        self.current_episodes[policy_idx]["log_probs"].append(log_prob)
+        self.current_episodes[policy_idx]["reward"].append(reward)
+
+    def finish_episode(self, policy_idx):
+        if len(self.current_episodes[policy_idx]["reward"]) > 0:
+            self.buffers[policy_idx].append(self.current_episodes[policy_idx])
+        self.current_episodes[policy_idx] = self._init_empty_episode()
+
+    def get_latest_trajectory(self, policy_idx):
+        if len(self.buffers[policy_idx]) > 0:
+            return self.buffers[policy_idx][-1]
+        return None
+
+    def clear_buffer(self):
+        self.buffers = [[] for _ in range(self.N)]
+
+
+class ContinuousActor(nn.Module):
+    def __init__(self, observation_space, action_space, hidden_dim=256):
+        super().__init__()
+        self.extractor = FeatureExtractor(observation_space)
+        self.action_dim = action_space.shape[0]
+
+        self.mean_head = nn.Linear(self.extractor.feature_dim, self.action_dim)
+        self.log_std = nn.Parameter(torch.zeros(self.action_dim))
+
+    def forward_features(self, obs):
+        return self.extractor(obs)
+
+    def get_distribution(self, features):
+        mean = torch.tanh(self.mean_head(features))
+        std = torch.exp(self.log_std).clamp(min=1e-3, max=1.0)
+        return torch.distributions.Normal(mean, std)
+
+    def sample_action(self, obs: torch.Tensor):
+        feat = self.forward_features(obs)
+        dist = self.get_distribution(feat)
+        action = dist.sample()
+        log_prob = dist.log_prob(action).sum(dim=-1)
+        return action, log_prob, feat
+
+    def get_deterministic_action(self, obs: torch.Tensor) -> torch.Tensor:
+        feat = self.forward_features(obs)
+        return torch.tanh(self.mean_head(feat))
+
+
+def compute_returns_to_go(rewards, gamma, device):
+    res, disc = [], 0
+    for r in reversed(rewards):
+        disc = r + gamma * disc
+        res.insert(0, disc)
+    return torch.tensor(res, dtype=torch.float32).to(device)
+
+
+def normalize_advantages_by_group(advantages, groups, device):
+    normalized_advantages = [None] * len(advantages)
+    for g in np.unique(groups):
+        group_idx = np.where(groups == g)[0]
+        g_adv = torch.cat([advantages[i] for i in group_idx])
+        mean_adv, std_adv = g_adv.mean(), g_adv.std() + 1e-8
+        for i in group_idx:
+            normalized_advantages[i] = (advantages[i] - mean_adv) / std_adv
+    return normalized_advantages

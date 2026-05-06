@@ -10,6 +10,7 @@ import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
 import Algorithms.PPO as PPO
+import Algorithms.CGRPO_r1 as AGRPO
 import time
 import numpy as np
 import Plotting as plot
@@ -89,6 +90,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         # ==========================================
         state, _ = env.reset()                                  # Reset environment
         # ep_reward = 0
+        agent.current_episode = ep
 
         for t in range(MAX_STEPS):
             action = agent.select_action(state)
@@ -156,6 +158,7 @@ if __name__ == '__main__':
         "SAC_Giovanni": SAC_Giovanni.SAC,
         "GRPO": GRPO.GRPO,
         "CGRPO": CGRPO.CGRPO,
+        "AGRPO": AGRPO.AGRPO,
         "GRPO_Giovanni": GRPO_Giovanni.GRPO_Giovanni,
     }
 
@@ -190,7 +193,7 @@ if __name__ == '__main__':
             raise ValueError(f"Unknown AGENTS requested: {unknown}. Available: {list(AGENT_REGISTRY.keys())}")
         agents = [AGENT_REGISTRY[name] for name in requested]
     else:
-        agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni]
+        agents = [TD3.TD3, PPO.PPO, SAC.SAC, CGRPO.CGRPO, GRPO_Giovanni.GRPO_Giovanni, AGRPO.AGRPO]
 
     print(f"RUN_MODE={RUN_MODE} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
     print(f"ENV_NAMES={ENV_NAMES}")
@@ -234,7 +237,7 @@ if __name__ == '__main__':
                     for idx, seed in enumerate(master_seeds)
                 ]
 
-                with mp.Pool(processes=5) as pool:
+                with mp.Pool(processes=1) as pool:
                     results = pool.starmap(run_single_seed, args)
 
                 all_results[env_name][algo_name] = results

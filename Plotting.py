@@ -78,7 +78,7 @@ def save_data(new_rewards_dict, folder="plots", filename="all_results.json"):
     print(f"Data successfully saved/updated in {filepath}")
 
 
-def plot_data(folder="plots", filename="all_results.json", plot_name="learning_curves.png", window_size=10):
+def plot_data(folder="plots", filename="all_results.json", plot_name="learning_curves.png", window_size=20):
     """
     Reads the centralized JSON database and generates a comprehensive grid plot 
     comparing all stored algorithms across all recorded environments.
