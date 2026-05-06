@@ -137,16 +137,26 @@ class CGRPO:
         self.ref_actor.load_state_dict(self.actors[0].state_dict())
 
     def _update_reference_policy_mixture(self, all_returns):
+            """Update ref_actor to be a soft mixture of top-performing policies per Algorithm 1."""
             num_top = max(1, self.N // 5)                               # Select top 20% of policies based on returns to form the reference policy mixture
             top_indices = np.argsort(all_returns)[-num_top:]             # Get the indices of the top performing policies
-            
-            tau = 0.1                                                   # Soft update parameter for blending the top policies into the reference policy
-            for name, param in self.ref_actor.named_parameters():
-                avg_param = torch.stack([self.actors[idx].state_dict()[name] for idx in top_indices]).mean(dim=0)  # Average the parameters of the top policies for this parameter
-                param.data.copy_(tau * avg_param + (1 - tau) * param.data)                                          # Soft update the reference policy's parameters towards the average of the top policies (this creates a more robust reference policy that represents a strong strategy for others to learn from) 
+
+            # Hard assignment: directly average top-K policies (more stable than soft update)
+            with torch.no_grad():
+                avg_state_dict = {}
+                for name in self.actors[0].state_dict():
+                    avg_state_dict[name] = torch.stack(
+                        [self.actors[idx].state_dict()[name] for idx in top_indices]
+                    ).mean(dim=0)
+                self.ref_actor.load_state_dict(avg_state_dict) 
 
 
-    def update(self):        
+    def update(self):
+        # CRITICAL: Sync old_actors to actors BEFORE update to ensure PPO ratio is computed correctly
+        # old_actors represents the policy used during data collection, actors gets updated in this step
+        for i in range(self.N):
+            self.old_actors[i].load_state_dict(self.actors[i].state_dict())
+
         all_phi = []                                                                            # store feature vector for policy phi_i
         all_returns = []
         all_features_np = []
@@ -201,7 +211,7 @@ class CGRPO:
         trajectory_lengths = [len(f) for f in all_features_np]                                  # Length of each trajectory (number of steps) for indexing
         start_indices = np.cumsum([0] + trajectory_lengths[:-1])                                # Starting index of each trajectory in the flattened feature array
 
-        #### State clustering with DBSCAN
+        # State clustering with DBSCAN per Algorithm 1 line 13
         scaler = StandardScaler()
         all_states_scaled = scaler.fit_transform(all_states_flat)
 
@@ -329,19 +339,17 @@ class CGRPO:
             surr2 = torch.clamp(ratio, 1 - epsilon_i, 1 + epsilon_i) * advantages                       # Calculate the clipped surrogate loss using the adaptive epsilon_i for this policy's group
             actor_loss = -torch.min(surr1, surr2).mean()                                                # Final actor loss is the negative of the minimum of the two surrogate losses
 
-            # L smooth Regularization
+            # L smooth Regularization (Eq. 10): regularize network feature differences, not action means
             l_smooth = torch.tensor(0.0).to(self.device)                                                # Initialize temporal smoothness regularization term
-            if len(dist.mean) > 1:                                                                      # Only calculate temporal smoothness if there are multiple time steps in the trajectory
-                l_smooth = torch.mean((dist.mean[1:] - dist.mean[:-1]) ** 2)                            # Temporal smoothness regularization to encourage similar actions in consecutive time steps
+            if feat.shape[0] > 1:                                                                      # Only calculate temporal smoothness if there are multiple time steps in the trajectory
+                l_smooth = torch.mean((feat[1:] - feat[:-1]) ** 2)                                    # Temporal smoothness: penalize large changes in network features between consecutive timesteps
             
-            # Diversity Regularization (L_diversity)
+            # Diversity Regularization (Eq. 11): encourage policies to explore different strategies
             l_diversity = torch.tensor(0.0).to(self.device)                                             # Initialize diversity regularization term
             if self.lam_d > 0:                                                                          # Only calculate diversity regularization if lambda_d is greater than 0
                 mu_i_avg = dist.mean.mean(dim=0, keepdim=True)                                             # Mean action of the current policy i (used for diversity regularization)
-                for j in range(self.N):
-                    if i == j:
-                        continue
-                    mu_j_avg = all_mus[j].mean(dim=0, keepdim=True)                                                                   # Mean action of policy j
+                for j in range(i + 1, self.N):  # Only compute for i < j to avoid double-counting pairs
+                    mu_j_avg = all_mus[j].mean(dim=0, keepdim=True)                                   # Mean action of policy j
                     cos_sim = torch.cosine_similarity(mu_i_avg, mu_j_avg, dim=-1)                      # Calculate cosine similarity between the mean actions of policy i and policy j
                     l_diversity += torch.max(torch.tensor(0.0).to(self.device), cos_sim - self.tau)     # Diversity regularization to encourage different policies to explore different strategies (penalize high similarity above a threshold tau)
 
@@ -356,10 +364,6 @@ class CGRPO:
 
         self._update_reference_policy_mixture(all_returns)                        # Update the reference policy to be a mixture of the top K performing policies based on their returns (this encourages the reference policy to represent a strong strategy that other policies can learn from)
 
-        
-        # Cleanup & Sync
-        for i in range(self.N):
-            self.old_actors[i].load_state_dict(self.actors[i].state_dict())
         self.buffer.clear_buffer()
 
     def save_checkpoint(self, path, ep, eval_rewards):
