@@ -35,6 +35,7 @@ RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
 MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
 MAX_STEPS = int(os.getenv("MAX_STEPS", "1000" if RUN_MODE == "full" else "400"))
 NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
+RECOVERY = os.getenv("RECOVERY", "false").strip().lower() == "true"
 
 env_override = os.getenv("ENV_NAMES", "").strip()
 if env_override:
@@ -103,6 +104,9 @@ for env_name in ENV_NAMES:
         # Get the name directly from the class
         algo_name = AgentClass.__name__
         
+        checkpoint_dir = "checkpoints"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
         if algo_name not in all_results[env_name]:
             all_results[env_name][algo_name] = []
 
@@ -111,19 +115,31 @@ for env_name in ENV_NAMES:
         for seed_idx, seed in enumerate(master_seeds):
             print(f"\n--- Starting run with seed {seed_idx}/{len(master_seeds)} ---")
 
+            ckpt_path = os.path.join(checkpoint_dir, f"{env_name}_{algo_name}_s{seed}_last.pth")
+            final_path = os.path.join(checkpoint_dir, f"{env_name}_{algo_name}_s{seed}_final.pth")
+
             set_seed(seed) # Set the seed for reproducibility for this run
-            
             seed_time = time.time()
+            
             if algo_name == "CGRPO":
-                agent = AgentClass(env, N=5, K=2) # Initialize CGRPO with specific parameters
+                agent = AgentClass(env, N=20, K=2) # Initialize CGRPO with specific parameters
             else:
                 agent = AgentClass(env) # Initialize agent with environment
             
-            print(f"\n--- Run: {algo_name} | Seed: {seed} ---")
-
+            start_episode = 0
             eval_rewards = []
 
-            for ep in range(MAX_EPISODES):
+            if RECOVERY and os.path.exists(ckpt_path):
+                print(f"--- Recovery: Loading Checkpoint for Seed {seed} ---")
+                # Load the checkpoint and extract the episode number and evaluation rewards to resume training from where it left off
+                checkpoint_data = agent.load_checkpoint(ckpt_path)
+                start_episode = checkpoint_data.get('episode', 0) + 1
+                eval_rewards = checkpoint_data.get('eval_rewards', [])
+                print(f"Resuming from Episode {start_episode}")
+
+            print(f"\n--- Run: {algo_name} | Seed: {seed} ---")
+
+            for ep in range(start_episode, MAX_EPISODES):
                 # ==========================================
                 # 1. TRAINING (Collect data & learn)
                 # ==========================================
@@ -140,7 +156,7 @@ for env_name in ENV_NAMES:
                     agent.step(state, action, reward, next_state, episode_done)
 
                     state = next_state
-                    # state, ep_reward = next_state, ep_reward + reward
+                    # state, ep_reward = next_state, ep_reward + reward                    
                     if episode_done:
                         break
                 
@@ -157,13 +173,20 @@ for env_name in ENV_NAMES:
 
                 eval_rewards.append(eval_ep_reward)
 
+                # Checkpointing
+                if ep > 0 and ep % 100 == 0:
+                    agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards)
+                    print(f"Checkpoint saved at Episode {ep}")
+
+                # Logging
                 step_time = time.time() - seed_time
                 Environment_name = env_name.split("/")[-1] # Extract the environment name for cleaner logging
                 if ep % 10 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
 
             # Store the rewards under the specific algorithm's name
+            agent.save_checkpoint(final_path, ep=MAX_EPISODES-1, eval_rewards=eval_rewards) # Save the final model checkpoint after training is complete
             all_results[env_name][algo_name].append(eval_rewards)
-        
+
         current_data = {
             env_name: {
                 algo_name: all_results[env_name][algo_name]
