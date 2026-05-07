@@ -94,12 +94,13 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             track_seed = 42 + (ep // 20) 
             state, _ = env.reset(seed=track_seed)
             track_data = [(t[2], t[3]) for t in env.unwrapped.track]
+            if hasattr(agent, 'current_track_data'):
+                agent.current_track_data = track_data
             
         else:
             state, _ = env.reset()                                  # Reset environment
         # ep_reward = 0
-        if hasattr(agent, 'current_track_data'):
-            agent.current_track_data = track_data
+        
         agent.current_episode = ep
 
         for t in range(MAX_STEPS):
