@@ -31,7 +31,7 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, RECOVERY, checkpoint_dir):
+def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, skip_steps, RECOVERY, checkpoint_dir):
     
     final_path = os.path.join(checkpoint_dir, f"{env_name}_{algo_name}_s{seed}_final.pth")
     if RECOVERY and os.path.exists(final_path):
@@ -44,11 +44,16 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
 
     set_seed(seed) # Set the seed for reproducibility for this run
     seed_time = time.time()
-    env = gym.make(env_name, max_episode_steps=MAX_STEPS)
-    eval_env = gym.make(env_name, max_episode_steps=MAX_STEPS)
+
+    env_max_steps = MAX_STEPS
+    if env_name == "CarRacing-v3":
+        env_max_steps = MAX_STEPS * skip_steps 
+
+    env = gym.make(env_name, max_episode_steps=env_max_steps)
+    eval_env = gym.make(env_name, max_episode_steps=env_max_steps)
 
     if env_name == "CarRacing-v3":
-        env = bf.SkipFrame(env, skip=4) # Apply frame skipping to speed up training for CarRacing-v3
+        env = bf.SkipFrame(env, skip=skip_steps) # Apply frame skipping to speed up training for CarRacing-v3
         env = bf.CarRacingWrapper(env)
         env = bf.CarRacingActionWrapper(env) # Apply the action wrapper to convert continuous actions to discrete for CarRacing-v3a
         eval_env = bf.CarRacingWrapper(eval_env)
@@ -94,8 +99,8 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             track_seed = 42 + (ep // 20) 
             state, _ = env.reset(seed=track_seed)
             track_data = [(t[2], t[3]) for t in env.unwrapped.track]
-            if hasattr(agent, 'current_track_data'):
-                agent.current_track_data = track_data
+            #if hasattr(agent, 'current_track_data'):
+            agent.current_track_data = track_data
             
         else:
             state, _ = env.reset()                                  # Reset environment
@@ -120,13 +125,15 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
 
             # For dm_control: treat truncated (time limit) as episode end
             episode_done = done or truncated
-            agent.step(state, action, reward, next_state, episode_done, pos = pos)
+            stats = agent.step(state, action, reward, next_state, episode_done, pos = pos)
+            if stats is not None:
+                print(f"  [Loss] Actor: {stats['actor']:.4f} | Div: {stats['div']:.4f} | Trauma: {stats['trauma']:.4f}")
 
             state = next_state
             # state, ep_reward = next_state, ep_reward + reward                    
             if episode_done:
                 break
-        
+
         # ==========================================
         # 2. EVALUATION
         # ==========================================
@@ -186,6 +193,7 @@ if __name__ == '__main__':
     RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower()  # quick | full
     MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
     MAX_STEPS = int(os.getenv("MAX_STEPS", "1000" if RUN_MODE == "full" else "400"))
+    SKIP_STEPS = int(os.getenv("SKIP_STEPS", "4" if RUN_MODE == "full" else "2"))
     NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
     RECOVERY = os.getenv("RECOVERY", "false").strip().lower() == "true"
     MULTIPROCESSING = os.getenv("MULTIPROCESSING", "false").strip().lower() == "true"
@@ -254,7 +262,7 @@ if __name__ == '__main__':
                 print(f"\n--- Training {algo_name} on {env_name} (Parallel Seeds) ---")
 
                 args = [
-                    (seed, idx, NUM_SEEDS, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, RECOVERY, checkpoint_dir)
+                    (seed, idx, NUM_SEEDS, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, SKIP_STEPS, RECOVERY, checkpoint_dir)
                     for idx, seed in enumerate(master_seeds)
                 ]
 
@@ -264,7 +272,7 @@ if __name__ == '__main__':
                 all_results[env_name][algo_name] = results
             else:
                 for seed_idx, seed in enumerate(master_seeds):
-                    eval_rewards = run_single_seed(seed, seed_idx, NUM_SEEDS, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, RECOVERY, checkpoint_dir)
+                    eval_rewards = run_single_seed(seed, seed_idx, NUM_SEEDS, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, SKIP_STEPS, RECOVERY, checkpoint_dir)
                     all_results[env_name][algo_name].append(eval_rewards)
                 
 

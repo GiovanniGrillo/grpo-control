@@ -19,7 +19,8 @@ class AGRPO:
     and optimizes policies relative to the context baselines.
     """
     def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=20, K=2, epsilon=0.2,
-                 tau=0.5, lam_s=0.01, lam_d=0.0001, gamma=0.99, dbscan_eps=0.4):
+                 tau=0.5, lam_s=0.01, lam_d=0.0001, lam_t=0.01, gamma=0.99, dbscan_eps=0.4, 
+                 TRAUMA_THRESHOLD = -20.0):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
         self.N = N
@@ -28,8 +29,10 @@ class AGRPO:
         self.tau = tau
         self.lam_s = lam_s
         self.lam_d = lam_d
+        self.lam_t = lam_t
         self.gamma = gamma
         self.dbscan_eps = dbscan_eps
+        self.Trauma_Threshold = TRAUMA_THRESHOLD
         self.current_track_data = None
 
         self.trauma_centers = []
@@ -73,8 +76,10 @@ class AGRPO:
             self.current_policy_idx += 1
 
             if self.current_policy_idx >= len(self.actors):
-                self.update()
+                stats = self.update()
                 self.current_policy_idx = 0
+                return stats
+        return None
 
     def _update_reference_policy_mixture(self, all_returns):
         """
@@ -84,6 +89,9 @@ class AGRPO:
         num_top = max(1, int(len(self.actors) // 10))
         top_indices = np.argsort(all_returns)[-num_top:]
 
+        self.last_elite_rewards = [all_returns[i] for i in top_indices]
+        self.last_elite_indices = top_indices
+
         with torch.no_grad():
             avg_state_dict = {}
             for name in self.actors[0].state_dict():
@@ -91,6 +99,7 @@ class AGRPO:
                     [self.actors[idx].state_dict()[name] for idx in top_indices]
                 ).mean(dim=0)
             self.ref_actor.load_state_dict(avg_state_dict) 
+        return self.last_elite_rewards
 
     # --- UPDATE HELPER METHODS ---
 
@@ -121,34 +130,6 @@ class AGRPO:
 
         return np.array(all_phi), all_returns, all_features_np, all_pos_np
 
-    # def _cluster_states(self, all_features_np):
-        flat_features = np.concatenate(all_features_np, axis=0)
-        scaled = self.scaler.fit_transform(flat_features)
-
-        pca_dims = 20
-        print(f"pca_dims={pca_dims} | flat_features.shape={flat_features.shape} | scaled.shape={scaled.shape}")
-        pca_comps = min(pca_dims, flat_features.shape[1])
-        if self.pca is None or self.pca.n_components != pca_comps:
-            self.pca = PCA(n_components=pca_comps)
-        pca_features = self.pca.fit_transform(scaled)
-
-        pca_features = np.nan_to_num(pca_features, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
-
-        total_points = pca_features.shape[0]
-        c_size = int(max(20, total_points * 0.005))
-        min_samples = int(max(5, c_size / 10))
-        print(f"DBSCAN params: c_size={c_size}, min_samples={min_samples}, dbscan_eps={self.dbscan_eps}")
-
-        dbscan = HDBSCAN(min_cluster_size=c_size, min_samples=min_samples, cluster_selection_epsilon=self.dbscan_eps, core_dist_n_jobs=1)
-        labels = dbscan.fit_predict(pca_features)
-
-        # n_state_clusters = 10  # Fixed number of state clusters
-        # kmeans_state = KMeans(n_clusters=n_state_clusters, n_init='auto')
-        # labels = kmeans_state.fit_predict(pca_features)
-
-        self._plot_clusters(pca_features, labels)
-        return labels, [len(f) for f in all_features_np]
-
     def _cluster_states(self, all_features_np, all_pos_np):
         """Clustering states into contexts using a 3-step process: 
         1) PCA for dimensionality reduction, 
@@ -156,7 +137,7 @@ class AGRPO:
         3) KNN for assigning all points to clusters."""
         flat_features = np.concatenate(all_features_np, axis=0)
         
-        subsample_idx = np.arange(0, len(flat_features), 10)
+        subsample_idx = np.arange(0, len(flat_features), 20)
         features_subsampled = flat_features[subsample_idx]
         
         scaled_sub = self.scaler.fit_transform(features_subsampled)
@@ -199,11 +180,7 @@ class AGRPO:
             full_pca = np.nan_to_num(full_pca, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
             
             labels = knn.predict(full_pca)
-
-        num_clusters = len(np.unique(labels))
-        print(f"[Clustering] HDBSCAN found {num_clusters} core clusters in subsample.")
-        print(f"[Clustering] KNN assigned all {len(labels)} points to existing clusters (0 Noise).")
-
+        
         self._plot_clusters(full_pca if len(valid_labels) > 0 else pca_features_sub, labels)
 
         flat_pos = np.concatenate(all_pos_np, axis=0)
@@ -214,9 +191,11 @@ class AGRPO:
     
     def _plot_spatial_only(self, pos_data, labels):
         import os
+        from matplotlib.patches import Ellipse
         os.makedirs('plots', exist_ok=True)
         
         plt.figure(figsize=(10, 10))
+        ax = plt.gca()
         
         if hasattr(self, 'current_track_data') and self.current_track_data is not None:
             track_x = [p[0] for p in self.current_track_data]
@@ -227,9 +206,22 @@ class AGRPO:
             
             plt.plot(track_x, track_y, color='darkgray', linewidth=35, alpha=0.5, label='Road')
             plt.plot(track_x, track_y, color='white', linewidth=2, linestyle='--', alpha=0.8)
-        # ----------------------------------
+        
+        if self.trauma_centers:
+            max_weight = max([float(c['weight']) for c in self.trauma_centers])
+            
+            for center in self.trauma_centers:
+                pos = center['mu_pos']
+                width = float(center['sigma_pos_x']) * 1.5 
+                height = float(center['sigma_pos_y']) * 1.5
 
-        plt.scatter(pos_data[:, 0], pos_data[:, 1], c=labels, cmap='tab20', s=8, alpha=0.8, zorder=5)
+                alpha = float(np.clip(0.1 + 0.7 * (float(center['weight']) / max_weight), 0.1, 0.8))
+                
+                ellipse = Ellipse((float(pos[0]), float(pos[1])), width, height, color='red', alpha=alpha, zorder=4)
+                ax.add_patch(ellipse)
+                plt.scatter(float(pos[0]), float(pos[1]), color='darkred', s=20, marker='x', alpha=0.8, zorder=5)
+
+        plt.scatter(pos_data[:, 0], pos_data[:, 1], c=labels, cmap='tab20', s=8, alpha=0.8, zorder=6)
         
         ep = getattr(self, 'current_episode', 0)
         plt.title(f"Spatial Cluster Distribution (Ep {ep})")
@@ -251,7 +243,7 @@ class AGRPO:
         plt.savefig('state_space_clustered.png')
         plt.close()
 
-    def _compute_advantages(self, labels, traj_lengths):
+    def _compute_advantages(self, labels, traj_lengths, all_features_np, all_pos_np):
         all_returns_to_go = []
         for i in range(len(self.actors)):
             rewards = self.buffer.get_latest_trajectory(i)["reward"]
@@ -281,7 +273,71 @@ class AGRPO:
             adv = all_returns_to_go[i] - baseline
             advantages.append(adv)
             start += length
+
+        flat_features = np.concatenate(all_features_np, axis=0)
+        flat_pos = np.concatenate(all_pos_np, axis=0)
+        labels_np = labels  
+
+        unique_labels = np.unique(labels_np)
+        for c in unique_labels:
+            if c != -1 and cluster_means.get(c, 0) < self.Trauma_Threshold:
+                
+                mask = (labels_np == c)
+                trauma_points = flat_features[mask]
+
+                if len(trauma_points) > 5:
+                    mu = torch.tensor(trauma_points.mean(axis=0), dtype=torch.float32).to(self.device)
+                    # + 1e-4 für numerische Stabilität
+                    
+                    sigma = torch.tensor(trauma_points.std(axis=0) + 1e-4, dtype=torch.float32).to(self.device)
+                    
+                    severity = abs(cluster_means[c])
+                    mu_pos = flat_pos[mask].mean(axis=0)
+                    
+                    sigma_pos_x = flat_pos[mask][:, 0].std()
+                    sigma_pos_y = flat_pos[mask][:, 1].std()
+                    
+                    if sigma_pos_x < 0.1: sigma_pos_x = 0.1
+                    if sigma_pos_y < 0.1: sigma_pos_y = 0.1
+
+                    self.trauma_centers.append({
+                        'mu': mu,
+                        'sigma': sigma,
+                        'mu_pos': mu_pos,          
+                        'sigma_pos_x': sigma_pos_x,
+                        'sigma_pos_y': sigma_pos_y,   
+                        'weight': severity
+                    })
+                    # print(f"[Memory] Trauma saved! Weight: {severity:.2f}, Score: {len(trauma_points)}")
+
+                    if len(self.trauma_centers) > 200:
+                        self.trauma_centers.pop(0)
+                    else:
+                        print(f"[Memory] Trauma center added. Total centers: {len(self.trauma_centers)}")
+        
         return advantages
+
+    def _compute_trauma_penalty(self, feat):
+        """Calculates a penalty based on the distance of the current state features to known trauma centers.
+        The penalty is a weighted sum of Gaussian functions centered at each trauma point, where the weight is determined by the severity of the trauma (e.g., how low the returns were in that cluster)."""
+        if not self.trauma_centers:
+            return torch.tensor(0.0).to(self.device)
+
+        total_penalty = torch.tensor(0.0).to(self.device)
+        bandwidth = 1.0                                             # Controls how quickly the penalty falls off with distance
+
+        for center in self.trauma_centers:
+            mu = center['mu']
+            sigma = center['sigma']
+            weight = center['weight']
+
+            dist_sq = torch.sum(((feat - mu) / sigma) ** 2, dim=-1)
+
+            gauss_penalty = torch.exp(-dist_sq / (2 * (bandwidth ** 2)))
+
+            total_penalty += (gauss_penalty * weight).mean()
+
+        return total_penalty
 
     def _get_trajectory_obs(self, policy_idx):
         traj = self.buffer.get_latest_trajectory(policy_idx)
@@ -315,6 +371,13 @@ class AGRPO:
         current_lam_d = self.lam_d if ep >= 100 else 0.0
         min_std = max(0.05, 0.5 - (min(1.0, ep/200.0) * 0.45)) if ep < 160 else 0.00005
 
+        loss_stats = {
+            "actor_loss": 0.0,
+            "smooth_loss": 0.0,
+            "div_loss": 0.0,
+            "trauma_loss": 0.0
+        }
+
         for i in range(len(self.actors)):
             self.old_actors[i].load_state_dict(self.actors[i].state_dict())
             self.actors[i].log_std.data = torch.clamp(self.actors[i].log_std.data, min=np.log(min_std))
@@ -322,7 +385,7 @@ class AGRPO:
         phi, returns, features_np, all_pos_np = self._gather_metrics()
         labels, traj_lengths = self._cluster_states(features_np, all_pos_np)
 
-        advantages = self._compute_advantages(labels, traj_lengths)
+        advantages = self._compute_advantages(labels, traj_lengths, features_np, all_pos_np)
 
         advantages_raw_flat = torch.cat(advantages) 
         labels_t = torch.from_numpy(labels).to(self.device)
@@ -379,18 +442,36 @@ class AGRPO:
 
             l_smooth = torch.mean((feat[1:] - feat[:-1]) ** 2) if feat.shape[0] > 1 else 0
             l_div = self._compute_exp_diversity(i, all_mus, current_lam_d)
+            l_trauma = self._compute_trauma_penalty(feat)
 
-            total_loss = actor_loss + self.lam_s * l_smooth + current_lam_d * l_div
+            total_loss = actor_loss + self.lam_s * l_smooth + current_lam_d * l_div + self.lam_t * l_trauma
+
+            loss_stats["actor_loss"] += actor_loss.item()
+            loss_stats["smooth_loss"] += l_smooth.item() if torch.is_tensor(l_smooth) else l_smooth
+            loss_stats["div_loss"] += l_div.item()
+            loss_stats["trauma_loss"] += l_trauma.item()
 
             self.optimizers[i].zero_grad()
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(self.actors[i].parameters(), 0.5)
             self.optimizers[i].step()
 
-        self._update_reference_policy_mixture(returns)
+        elite_stats = self._update_reference_policy_mixture(returns)
         self.buffer.clear_buffer()
 
+        for key in loss_stats:
+            loss_stats[key] /= len(self.actors)
+        print(f"  [Loss Analysis] Actor: {loss_stats['actor_loss']:.4f} | Div: {loss_stats['div_loss']:.4f} | Trauma: {loss_stats['trauma_loss']:.4f}")
+
+        return {
+            "actor": loss_stats["actor_loss"],
+            "div": loss_stats["div_loss"],
+            "trauma": loss_stats["trauma_loss"],
+            "elite_mean": np.mean(elite_stats)
+        }
+
     def save_checkpoint(self, path, ep, eval_rewards):
+        import pickle
         checkpoint = {
             'episode': ep,
             'eval_rewards': eval_rewards,
@@ -400,7 +481,10 @@ class AGRPO:
             'ref_actor_state_dict': self.ref_actor.state_dict(),
             'optimizers_state_dict': [opt.state_dict() for opt in self.optimizers],
             'buffer_data': self.buffer.buffers,
-            'current_episodes': self.buffer.current_episodes if hasattr(self.buffer, 'current_episodes') else None
+            'current_episodes': self.buffer.current_episodes if hasattr(self.buffer, 'current_episodes') else None,
+            'trauma_centers': self.trauma_centers,
+            'scaler': self.scaler,
+            'pca': self.pca
         }
         torch.save(checkpoint, path)
 
@@ -423,5 +507,9 @@ class AGRPO:
 
         if ckpt['current_episodes'] is not None:
             self.buffer.current_episodes = ckpt['current_episodes']
+            
+        self.trauma_centers = ckpt.get('trauma_centers', [])
+        self.scaler = ckpt.get('scaler', StandardScaler())
+        self.pca = ckpt.get('pca', None)
 
         return ckpt
