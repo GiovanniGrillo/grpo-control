@@ -1,4 +1,4 @@
-# Python-Müll (wird automatisch generiert)
+# Python-Trash
 __pycache__/
 *.pyc
 *.pyo
@@ -10,7 +10,7 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Daten & Ergebnisse (damit dein GitHub nicht platzt)
+# Data & Results
 plots/
 *.png
 *.csv
@@ -22,11 +22,11 @@ checkpoints/
 *.ipynb
 
 
-# Virtuelle Umgebungen
+# Virtual Environments
 venv/
 .env
 .venv/
-# Betriebssystem-Spezifisches
+# IDE-specific
 .DS_Store
 Thumbs.db
 
