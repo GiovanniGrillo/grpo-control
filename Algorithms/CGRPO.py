@@ -139,7 +139,7 @@ class CGRPO:
 
     def _update_reference_policy_mixture(self, all_returns):
             """Update ref_actor to be a soft mixture of top-performing policies per Algorithm 1."""
-            num_top = max(1, self.N // 5)                               # Select top 20% of policies based on returns to form the reference policy mixture
+            num_top = max(1, int(self.N // 10))                               # Select top 10% of policies based on returns to form the reference policy mixture
             top_indices = np.argsort(all_returns)[-num_top:]             # Get the indices of the top performing policies
 
             # Hard assignment: directly average top-K policies (more stable than soft update)

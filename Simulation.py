@@ -88,8 +88,18 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         # ==========================================
         # 1. TRAINING (Collect data & learn)
         # ==========================================
-        state, _ = env.reset()                                  # Reset environment
+
+        track_data = None
+        if env_name == "CarRacing-v3" and hasattr(env.unwrapped, 'track'):
+            track_seed = 42 + (ep // 20) 
+            state, _ = env.reset(seed=track_seed)
+            track_data = [(t[2], t[3]) for t in env.unwrapped.track]
+            
+        else:
+            state, _ = env.reset()                                  # Reset environment
         # ep_reward = 0
+        if hasattr(agent, 'current_track_data'):
+            agent.current_track_data = track_data
         agent.current_episode = ep
 
         for t in range(MAX_STEPS):
@@ -97,9 +107,19 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
 
             next_state, reward, done, truncated, info = env.step(action)
             
+            if env_name == "CarRacing-v3":
+                # Safely get the car's physical position
+                if hasattr(env.unwrapped, 'car') and env.unwrapped.car is not None:
+                    pos = (env.unwrapped.car.hull.position[0], env.unwrapped.car.hull.position[1])
+                else:
+                    pos = (0.0, 0.0)
+            else:
+                # Fallback for Acrobot
+                pos = (np.arctan2(next_state[1], next_state[0]), np.arctan2(next_state[3], next_state[2]))
+
             # For dm_control: treat truncated (time limit) as episode end
             episode_done = done or truncated
-            agent.step(state, action, reward, next_state, episode_done)
+            agent.step(state, action, reward, next_state, episode_done, pos = pos)
 
             state = next_state
             # state, ep_reward = next_state, ep_reward + reward                    

@@ -136,14 +136,15 @@ class PopulationBuffer:
         self.current_episodes = [self._init_empty_episode() for _ in range(N)]
 
     def _init_empty_episode(self):
-        return {"obs": [], "feature": [], "action": [], "log_probs": [], "reward": []}
+        return {"obs": [], "feature": [], "action": [], "log_probs": [], "reward": [], "pos": []}
 
-    def add(self, policy_idx, obs, feature, action, log_prob, reward):
+    def add(self, policy_idx, obs, feature, action, log_prob, reward, pos=(0.0, 0.0)):
         self.current_episodes[policy_idx]["obs"].append(obs)
         self.current_episodes[policy_idx]["feature"].append(feature)
         self.current_episodes[policy_idx]["action"].append(action)
         self.current_episodes[policy_idx]["log_probs"].append(log_prob)
         self.current_episodes[policy_idx]["reward"].append(reward)
+        self.current_episodes[policy_idx]["pos"].append(pos)
 
     def finish_episode(self, policy_idx):
         if len(self.current_episodes[policy_idx]["reward"]) > 0:
