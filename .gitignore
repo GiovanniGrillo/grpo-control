@@ -4,8 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 
-Algorithms/
-__pycache__/
+Algorithms/__pycache__/
 *.pyc
 *.pyo
 *.pyd
