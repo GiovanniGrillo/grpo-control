@@ -40,6 +40,7 @@ class AGRPO:
         self.dbscan_eps = dbscan_eps
         self.warmup_episodes = warmup_episodes
         self.std_history = []
+        self.target_min_std_history = []
         
         # Trauma Management Parameters
         self.Trauma_Threshold = TRAUMA_THRESHOLD
@@ -288,10 +289,14 @@ class AGRPO:
 
                     # Reinforce existing traumas if the new hazard is in the same latent area
                     merged = False
-                    for existing in self.trauma_centers:
-                        dist_sq = torch.sum(((mu_feat - existing['mu']) / existing['sigma']) ** 2) / dim
-                        
-                        if dist_sq < 1.0:
+                    if self.trauma_centers:
+                        trauma_mus = torch.stack([t['mu'] for t in self.trauma_centers])
+                        trauma_sigmas = torch.stack([t['sigma'] for t in self.trauma_centers])
+                        dist_sq = torch.sum(((mu_feat.unsqueeze(0) - trauma_mus) / trauma_sigmas) ** 2, dim=-1) / dim
+                        min_idx = torch.argmin(dist_sq).item()
+
+                        if dist_sq[min_idx] < 1.0:
+                            existing = self.trauma_centers[min_idx]
                             # Accumulate weights (Gravity effect)
                             existing['weight'] += min(existing['weight'] + severity, max_weight)
                             # Average positions and features (Centering)
@@ -302,8 +307,7 @@ class AGRPO:
                             existing['sigma_pos_x'] = (existing['sigma_pos_x'] + sigma_pos_x) / 2
                             existing['sigma_pos_y'] = (existing['sigma_pos_y'] + sigma_pos_y) / 2
                             merged = True
-                            break
-                    
+
                     if not merged:
                         self.trauma_centers.append(new_trauma_data)
 
@@ -341,21 +345,26 @@ class AGRPO:
         if current_lam_d <= 0:
             return torch.tensor(0.0).to(self.device)
 
-        penalties = []
-        mu_i = self.actors[i].get_distribution(self.actors[i].forward_features(
-            torch.stack(self.buffer.get_latest_trajectory(i)["obs"]).to(self.device)
-        )).mean
-
+        mu_i = all_mus[i]
         exp_scale = 5.0
-        for j in range(len(self.actors)):
-            if i == j: continue
 
-            min_len = min(mu_i.shape[0], all_mus[j].shape[0])
-            step_sim = torch.cosine_similarity(mu_i[:min_len], all_mus[j][:min_len], dim=-1).mean()
-            penalty = torch.exp(exp_scale * (step_sim - self.tau)) - 1.0
-            penalties.append(torch.clamp(penalty, min=0.0))
+        # Vectorize similarity computation: stack all other mus and compute similarities at once
+        other_indices = [j for j in range(len(self.actors)) if j != i]
+        if not other_indices:
+            return torch.tensor(0.0).to(self.device)
 
-        return torch.stack(penalties).mean() if penalties else torch.tensor(0.0).to(self.device)
+        other_mus = torch.stack([all_mus[j] for j in other_indices])
+
+        # Compute all similarities at once
+        min_len = min(mu_i.shape[0], other_mus.shape[1])
+        sims = torch.nn.functional.cosine_similarity(
+            mu_i[:min_len].unsqueeze(0),
+            other_mus[:, :min_len],
+            dim=-1
+        )
+
+        penalties = torch.clamp(torch.exp(exp_scale * (sims - self.tau)) - 1.0, min=0.0)
+        return penalties.mean() if penalties.numel() > 0 else torch.tensor(0.0).to(self.device)
 
     def _plot_exploration_health(self):
         """
@@ -414,7 +423,8 @@ class AGRPO:
 
         with torch.no_grad():
             # What the actors actually have learned/feel right now
-            actual_stds = torch.stack([torch.exp(a.log_std).mean() for a in self.actors])
+            log_stds = torch.stack([a.log_std for a in self.actors])
+            actual_stds = torch.exp(log_stds).mean(dim=1)
             avg_actual_std = actual_stds.mean().item()
             
             self.std_history.append(avg_actual_std)
@@ -434,9 +444,6 @@ class AGRPO:
         self.trauma_centers = [c for c in self.trauma_centers if c['weight'] > self.trauma_forgeting_threshold]
 
         # Prevent std collapse
-        for i in range(len(self.actors)):
-            self.old_actors[i].load_state_dict(self.actors[i].state_dict())
-            self.actors[i].log_std.data = torch.clamp(self.actors[i].log_std.data, min=np.log(min_std))
 
         # 2. Gather data and calculate advantages
         phi, returns, features_np, all_pos_np = self._gather_metrics()
@@ -464,6 +471,12 @@ class AGRPO:
 
         sigma_global = torch.cat(normalized_advantages).std() + 1e-8
         group_members = {g: np.where(groups == g)[0] for g in np.unique(groups)}
+
+        # Pre-compute group epsilons to avoid repeated computation in agent loop
+        group_epsilons = {}
+        for g in group_members:
+            g_adv = torch.cat([advantages[j] for j in group_members[g]])
+            group_epsilons[g] = self.epsilon * torch.clamp(g_adv.std() / sigma_global, min=1.0)
 
         # Pre-calculate distributions for diversity comparisons
         actor_features, all_mus = {}, {}
@@ -509,9 +522,8 @@ class AGRPO:
             old_log_probs = torch.stack(traj["log_probs"]).to(self.device)
             adv = normalized_advantages[i].to(self.device)
 
-            # Adaptive clipping bounds based on group variance
-            g_adv = torch.cat([advantages[j] for j in group_members[groups[i]]])
-            epsilon_i = self.epsilon * torch.clamp(g_adv.std() / sigma_global, min=1.0)
+            # Use pre-computed group epsilon instead of recomputing
+            epsilon_i = group_epsilons[groups[i]]
 
             feat = actor_features[i]
             dist = self.actors[i].get_distribution(feat)
