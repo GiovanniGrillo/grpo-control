@@ -23,8 +23,8 @@ class AGRPO:
     It features a dynamic "Trauma Memory" system that identifies, records, and reinforces 
     highly penalized areas in the latent space, forcing agents to avoid persistent hazards.
     """
-    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=20, K=2, epsilon=0.2,
-                 tau=0.5, lam_s=0.01, lam_d=0.0001, lam_t=0.01, gamma=0.99, dbscan_eps=0.4, 
+    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=10, K=2, epsilon=0.2,
+                 tau=0.5, lam_s=0.01, lam_d=0.00005, lam_t=0.005, gamma=0.99, dbscan_eps=0.4, 
                  TRAUMA_THRESHOLD=-20.0, warmup_episodes=100):
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,6 +39,7 @@ class AGRPO:
         self.gamma = gamma
         self.dbscan_eps = dbscan_eps
         self.warmup_episodes = warmup_episodes
+        self.std_history = []
         
         # Trauma Management Parameters
         self.Trauma_Threshold = TRAUMA_THRESHOLD
@@ -262,6 +263,7 @@ class AGRPO:
         flat_pos = np.concatenate(all_pos_np, axis=0)
         dim = self.actors[0].extractor.feature_dim
         
+        max_weight = 1.0 / max(1e-6, self.lam_t)
         labels_np = labels
         for c in np.unique(labels_np):
             # Check if cluster mean return crosses the severity threshold
@@ -281,7 +283,7 @@ class AGRPO:
                     new_trauma_data = {
                         'mu': mu_feat, 'sigma': sigma_feat, 'mu_pos': mu_pos,          
                         'sigma_pos_x': sigma_pos_x, 'sigma_pos_y': sigma_pos_y,   
-                        'weight': severity
+                        'weight': min(severity, max_weight)
                     }
 
                     # Reinforce existing traumas if the new hazard is in the same latent area
@@ -291,7 +293,7 @@ class AGRPO:
                         
                         if dist_sq < 1.0:
                             # Accumulate weights (Gravity effect)
-                            existing['weight'] += severity
+                            existing['weight'] += min(existing['weight'] + severity, max_weight)
                             # Average positions and features (Centering)
                             existing['mu'] = (existing['mu'] + mu_feat) / 2
                             existing['mu_pos'] = (existing['mu_pos'] + mu_pos) / 2
@@ -355,6 +357,32 @@ class AGRPO:
 
         return torch.stack(penalties).mean() if penalties else torch.tensor(0.0).to(self.device)
 
+    def _plot_exploration_health(self):
+        """
+        Visualizes the health of exploration. 
+        Blue: What the agents actually do.
+        Red (Dashed): The minimum safety net we provide.
+        """
+        import os
+        os.makedirs('plots', exist_ok=True)
+        plt.figure(figsize=(10, 6))
+        
+        plt.plot(self.std_history, label='Actual Policy STD (Avg)', color='#1f77b4', linewidth=2)
+        plt.plot(self.target_min_std_history, label='Min Std Floor (Safety Net)', color='#d62728', linestyle='--')
+        
+        plt.fill_between(range(len(self.std_history)), self.target_min_std_history, self.std_history, 
+                         where=(np.array(self.std_history) > np.array(self.target_min_std_history)),
+                         color='#1f77b4', alpha=0.1, label='Learned Exploration Buffer')
+
+        plt.title(f"Exploration Health Analysis (Ep {getattr(self, 'current_episode', 0)})")
+        plt.xlabel("Update Steps")
+        plt.ylabel("Standard Deviation")
+        plt.yscale('log') # Log scale is crucial to see the collapse at small values
+        plt.grid(True, which="both", ls="-", alpha=0.2)
+        plt.legend()
+        plt.savefig('plots/exploration_health.png')
+        plt.close()
+
     # =========================================================================
     # MAIN OPTIMIZATION
     # =========================================================================
@@ -368,8 +396,35 @@ class AGRPO:
         4. Scouts (Bottom 10%): Maximum diversity exploration to find new paths.
         '''
         ep = getattr(self, 'current_episode', 0)
-        current_lam_d = self.lam_d if ep >= self.warmup_episodes else 0.0
-        min_std = max(0.05, 0.5 - (min(1.0, ep/200.0) * 0.45)) if ep < self.warmup_episodes * 2 else 0.00005
+        
+        std_start = 0.5
+        std_warmup_end = 0.2
+        std_final_floor = 0.05
+
+        if ep < self.warmup_episodes:
+            min_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * 0.3) 
+        else:
+            decay_lambda = 0.006931
+            time_passed = ep - self.warmup_episodes
+            
+            decay_range = std_warmup_end - std_final_floor
+            min_std = std_final_floor + decay_range * np.exp(-decay_lambda * time_passed)
+        
+        current_lam_d = self.lam_d * (min_std / 0.5) if ep >= self.warmup_episodes else 0.0
+
+        with torch.no_grad():
+            # What the actors actually have learned/feel right now
+            actual_stds = torch.stack([torch.exp(a.log_std).mean() for a in self.actors])
+            avg_actual_std = actual_stds.mean().item()
+            
+            self.std_history.append(avg_actual_std)
+            self.target_min_std_history.append(min_std)
+
+        for i in range(len(self.actors)):
+            self.old_actors[i].load_state_dict(self.actors[i].state_dict())
+            with torch.no_grad():
+                # We allow the network to be MORE noisy than min_std, but not less.
+                self.actors[i].log_std.clamp_(min=np.log(min_std))
 
         loss_stats = {"actor_loss": 0.0, "smooth_loss": 0.0, "div_loss": 0.0, "trauma_loss": 0.0}
 
@@ -431,6 +486,23 @@ class AGRPO:
                 
             updated_agents_count += 1
 
+            if i in elite_idx:
+                # Elites are "Fearless Pioneers": No trauma, no diversity pressure
+                role_lam_d = 0.0
+                role_lam_t = 0.0
+            elif i in scout_idx:
+                # Scouts are "Explorers": Normal trauma, but massive diversity pressure
+                role_lam_d = current_lam_d * 10.0
+                role_lam_t = self.lam_t
+            elif i in mid_idx:
+                # Mid-Tier are "Stable Performers": Normal trauma, normal diversity
+                role_lam_d = current_lam_d
+                role_lam_t = self.lam_t
+            else:
+                # Fallback (mostly for warmup phase before reset logic kicks in)
+                role_lam_d = current_lam_d
+                role_lam_t = self.lam_t 
+
             traj = self.buffer.get_latest_trajectory(i)
             obs = torch.stack(traj["obs"]).to(self.device)
             actions = torch.stack(traj["action"]).to(self.device)
@@ -462,9 +534,9 @@ class AGRPO:
             # Auxiliary penalties
             l_smooth = torch.mean((feat[1:] - feat[:-1]) ** 2) if feat.shape[0] > 1 else 0
             l_div = self._compute_exp_diversity(i, all_mus, role_lam_d)
-            l_trauma = self._compute_trauma_penalty(feat)
+            l_trauma = role_lam_t * self._compute_trauma_penalty(feat)
 
-            total_loss = actor_loss + self.lam_s * l_smooth + l_div + self.lam_t * l_trauma
+            total_loss = actor_loss + (self.lam_s * l_smooth) + l_div + l_trauma
 
             # Gradient Step
             self.optimizers[i].zero_grad()
@@ -476,7 +548,7 @@ class AGRPO:
             loss_stats["actor_loss"] += actor_loss.item()
             loss_stats["smooth_loss"] += l_smooth.item() if torch.is_tensor(l_smooth) else l_smooth
             loss_stats["div_loss"] += l_div.item() if torch.is_tensor(l_div) else l_div
-            loss_stats["trauma_loss"] += l_trauma.item()
+            loss_stats["trauma_loss"] += l_trauma.item() if torch.is_tensor(l_trauma) else l_trauma
 
 
         # ==========================================
@@ -540,6 +612,9 @@ class AGRPO:
             # Divide by the actual number of trained agents to get accurate monitoring metrics
             loss_stats[key] /= max(1, updated_agents_count) 
 
+        if ep % 20 == 0:
+            self._plot_exploration_health()
+
         return {
             "actor": loss_stats["actor_loss"],
             "div": loss_stats["div_loss"],
@@ -566,18 +641,6 @@ class AGRPO:
             plt.plot(track_x, track_y, color='darkgray', linewidth=35, alpha=0.5, label='Road')
             plt.plot(track_x, track_y, color='white', linewidth=2, linestyle='--', alpha=0.8)
         
-        # Plot Trauma Centers
-        if self.trauma_centers:
-            max_weight = max([float(c['weight']) for c in self.trauma_centers])
-            for center in self.trauma_centers:
-                pos = center['mu_pos']
-                width, height = float(center['sigma_pos_x']) * 1.5, float(center['sigma_pos_y']) * 1.5
-                alpha = float(np.clip(0.1 + 0.7 * (float(center['weight']) / max_weight), 0.1, 0.8))
-                
-                ellipse = Ellipse((float(pos[0]), float(pos[1])), width, height, color='red', alpha=alpha, zorder=4)
-                ax.add_patch(ellipse)
-                plt.scatter(float(pos[0]), float(pos[1]), color='darkred', s=20, marker='x', alpha=0.8, zorder=5)
-
         # Plot agent positions
         plt.scatter(pos_data[:, 0], pos_data[:, 1], c=labels, cmap='tab20', s=8, alpha=0.8, zorder=6)
         

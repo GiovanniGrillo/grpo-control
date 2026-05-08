@@ -10,7 +10,7 @@ import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
 import Algorithms.PPO as PPO
-import Algorithms.CGRPO_r1 as AGRPO
+import Algorithms.AGRPO as AGRPO
 import time
 import numpy as np
 import Plotting as plot
@@ -21,6 +21,7 @@ import torch.multiprocessing as mp
 
 import warnings
 
+os.environ["USE_NNPACK"] = "0"
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 # Helper functions
 
@@ -72,7 +73,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     final_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_final.pth")
     
     if algo_name in ["CGRPO", "AGRPO"]:
-        agent = AgentClass(env, N=20, K=2) # Initialize CGRPO with specific parameters
+        agent = AgentClass(env, N=10, K=2) # Initialize CGRPO with specific parameters
     else:
         agent = AgentClass(env) # Initialize agent with environment
     
