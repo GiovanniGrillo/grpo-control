@@ -71,13 +71,15 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     ckpt_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_last.pth")
     final_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_final.pth")
     
-    if algo_name == "CGRPO":
+    if algo_name in ["CGRPO", "AGRPO"]:
         agent = AgentClass(env, N=20, K=2) # Initialize CGRPO with specific parameters
     else:
         agent = AgentClass(env) # Initialize agent with environment
     
     start_episode = 0
     eval_rewards = []
+
+    current_elite_score = 0.0
 
     if RECOVERY and os.path.exists(ckpt_path):
         print(f"--- Recovery: Loading Checkpoint for Seed {seed} ---")
@@ -127,6 +129,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             episode_done = done or truncated
             stats = agent.step(state, action, reward, next_state, episode_done, pos = pos)
             if stats is not None:
+                current_elite_score = stats.get("elite_mean", 0)
                 print(f"  [Loss] Actor: {stats['actor']:.4f} | Div: {stats['div']:.4f} | Trauma: {stats['trauma']:.4f}")
 
             state = next_state
@@ -137,13 +140,16 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         # ==========================================
         # 2. EVALUATION
         # ==========================================
-        eval_state, _ = eval_env.reset()
-        eval_ep_reward = 0
-        for t in range(MAX_STEPS):
-            eval_action = agent.select_action(eval_state, evaluate=True) 
-            eval_state, r, d, trunc, _ = eval_env.step(eval_action)
-            eval_ep_reward += r
-            if d or trunc: break
+        if algo_name == "AGRPO":
+            eval_ep_reward = current_elite_score
+        else:
+            eval_state, _ = eval_env.reset()
+            eval_ep_reward = 0
+            for t in range(MAX_STEPS):
+                eval_action = agent.select_action(eval_state, evaluate=True) 
+                eval_state, r, d, trunc, _ = eval_env.step(eval_action)
+                eval_ep_reward += r
+                if d or trunc: break
 
         eval_rewards.append(eval_ep_reward)
 
@@ -266,7 +272,7 @@ if __name__ == '__main__':
                     for idx, seed in enumerate(master_seeds)
                 ]
 
-                with mp.Pool(processes=1) as pool:
+                with mp.Pool(processes=2) as pool:
                     results = pool.starmap(run_single_seed, args)
 
                 all_results[env_name][algo_name] = results

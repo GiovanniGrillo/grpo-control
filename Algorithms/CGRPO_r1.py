@@ -33,6 +33,7 @@ class AGRPO:
         self.gamma = gamma
         self.dbscan_eps = dbscan_eps
         self.Trauma_Threshold = TRAUMA_THRESHOLD
+        self.trauma_forgeting_threshold = self.Trauma_Threshold / 3.0
         self.current_track_data = None
 
         self.trauma_centers = []
@@ -181,17 +182,17 @@ class AGRPO:
             
             labels = knn.predict(full_pca)
         
+        traj_lengths = [len(f) for f in all_features_np]
         self._plot_clusters(full_pca if len(valid_labels) > 0 else pca_features_sub, labels)
 
         flat_pos = np.concatenate(all_pos_np, axis=0)
         self._plot_spatial_only(flat_pos, labels)
         
-        return labels, [len(f) for f in all_features_np]
+        return labels, traj_lengths
     
     
     def _plot_spatial_only(self, pos_data, labels):
         import os
-        from matplotlib.patches import Ellipse
         os.makedirs('plots', exist_ok=True)
         
         plt.figure(figsize=(10, 10))
@@ -207,20 +208,6 @@ class AGRPO:
             plt.plot(track_x, track_y, color='darkgray', linewidth=35, alpha=0.5, label='Road')
             plt.plot(track_x, track_y, color='white', linewidth=2, linestyle='--', alpha=0.8)
         
-        if self.trauma_centers:
-            max_weight = max([float(c['weight']) for c in self.trauma_centers])
-            
-            for center in self.trauma_centers:
-                pos = center['mu_pos']
-                width = float(center['sigma_pos_x']) * 1.5 
-                height = float(center['sigma_pos_y']) * 1.5
-
-                alpha = float(np.clip(0.1 + 0.7 * (float(center['weight']) / max_weight), 0.1, 0.8))
-                
-                ellipse = Ellipse((float(pos[0]), float(pos[1])), width, height, color='red', alpha=alpha, zorder=4)
-                ax.add_patch(ellipse)
-                plt.scatter(float(pos[0]), float(pos[1]), color='darkred', s=20, marker='x', alpha=0.8, zorder=5)
-
         plt.scatter(pos_data[:, 0], pos_data[:, 1], c=labels, cmap='tab20', s=8, alpha=0.8, zorder=6)
         
         ep = getattr(self, 'current_episode', 0)
@@ -243,7 +230,155 @@ class AGRPO:
         plt.savefig('state_space_clustered.png')
         plt.close()
 
+    # def _compute_advantages(self, labels, traj_lengths, all_features_np, all_pos_np):
+    #     all_returns_to_go = []
+    #     for i in range(len(self.actors)):
+    #         rewards = self.buffer.get_latest_trajectory(i)["reward"]
+    #         rtg = bf.compute_returns_to_go(rewards, self.gamma, self.device)
+    #         all_returns_to_go.append(rtg)
+
+    #     flat_returns = torch.cat(all_returns_to_go)
+    #     labels_t = torch.from_numpy(labels).to(self.device)
+
+    #     unique_labels = torch.unique(labels_t)
+    #     cluster_means = {}
+
+    #     global_mean = flat_returns.mean()
+    #     for c in unique_labels:
+    #         c_item = c.item()
+    #         if c_item != -1:
+    #             cluster_means[c_item] = flat_returns[labels_t == c].mean()
+
+    #     cluster_means[-1] = global_mean
+
+    #     advantages = []
+    #     start = 0
+    #     for i, length in enumerate(traj_lengths):
+    #         policy_labels = labels[start:start+length]
+    #         policy_labels_t = labels_t[start:start+length]
+    #         baseline = torch.tensor([cluster_means.get(int(l), cluster_means.get(-1, 0.0)) for l in policy_labels], dtype=torch.float32).to(self.device)
+    #         adv = all_returns_to_go[i] - baseline
+    #         advantages.append(adv)
+    #         start += length
+
+    #     flat_features = np.concatenate(all_features_np, axis=0)
+    #     flat_pos = np.concatenate(all_pos_np, axis=0)
+    #     labels_np = labels  
+
+    #     unique_labels = np.unique(labels_np)
+    #     for c in unique_labels:
+    #         if c != -1 and cluster_means.get(c, 0) < self.Trauma_Threshold:
+                
+    #             mask = (labels_np == c)
+    #             trauma_points = flat_features[mask]
+
+    #             if len(trauma_points) > 5:
+    #                 mu = torch.tensor(trauma_points.mean(axis=0), dtype=torch.float32).to(self.device)
+    #                 # + 1e-4 für numerische Stabilität
+                    
+    #                 sigma = torch.tensor(trauma_points.std(axis=0) + 1e-4, dtype=torch.float32).to(self.device)
+                    
+    #                 severity = abs(cluster_means[c])
+    #                 mu_pos = flat_pos[mask].mean(axis=0)
+                    
+    #                 sigma_pos_x = flat_pos[mask][:, 0].std()
+    #                 sigma_pos_y = flat_pos[mask][:, 1].std()
+                    
+    #                 if sigma_pos_x < 0.1: sigma_pos_x = 0.1
+    #                 if sigma_pos_y < 0.1: sigma_pos_y = 0.1
+
+    #                 self.trauma_centers.append({
+    #                     'mu': mu,
+    #                     'sigma': sigma,
+    #                     'mu_pos': mu_pos,          
+    #                     'sigma_pos_x': sigma_pos_x,
+    #                     'sigma_pos_y': sigma_pos_y,   
+    #                     'weight': severity
+    #                 })
+    #                 # print(f"[Memory] Trauma saved! Weight: {severity:.2f}, Score: {len(trauma_points)}")
+
+    #                 if len(self.trauma_centers) > 200:
+    #                     self.trauma_centers.pop(0)
+    #                 else:
+    #                     print(f"[Memory] Trauma center added. Total centers: {len(self.trauma_centers)}")
+        
+    #     return advantages
+
+    # def _compute_advantages(self, labels, traj_lengths, all_features_np, all_pos_np):
+        # 1. Collect returns on GPU
+        all_returns_to_go = []
+        for i in range(len(self.actors)):
+            rewards = self.buffer.get_latest_trajectory(i)["reward"]
+            rtg = bf.compute_returns_to_go(rewards, self.gamma, self.device)
+            all_returns_to_go.append(rtg)
+
+        flat_returns = torch.cat(all_returns_to_go) # Shape: (Total_Steps,)
+        labels_t = torch.from_numpy(labels).to(self.device).long() # Shape: (Total_Steps,)
+
+        # 2. Vectorized Cluster Means calculation on GPU
+        # We map labels: -1 -> Index 0, 0 -> Index 1, 1 -> Index 2, etc.
+        max_label = int(labels.max())
+        means_vec = torch.zeros(max_label + 2, device=self.device)
+        
+        # Calculate global mean (for noise/label -1)
+        means_vec[0] = flat_returns.mean()
+        
+        # Calculate each cluster mean using GPU masking
+        unique_labels = torch.unique(labels_t)
+        for c in unique_labels:
+            if c == -1: continue
+            means_vec[c + 1] = flat_returns[labels_t == c].mean()
+
+        # 3. Vectorized Baseline Expansion (The Speed Boost)
+        # Instead of a Python loop, we use labels_t as an index array.
+        # This creates the full baseline tensor in one O(1) GPU operation.
+        flat_baselines = means_vec[labels_t + 1]
+        
+        # 4. Advantage Calculation
+        flat_advantages = flat_returns - flat_baselines
+        
+        # Split back into individual trajectories for the agents
+        advantages = list(torch.split(flat_advantages, traj_lengths))
+
+        # 5. Trauma Identification (Keep on CPU as it involves small loops and NumPy/Logging)
+        flat_features = np.concatenate(all_features_np, axis=0)
+        flat_pos = np.concatenate(all_pos_np, axis=0)
+        dim = self.actors[0].extractor.feature_dim
+        
+        # Use NumPy for the cluster loop to avoid unnecessary .item() calls
+        labels_np = labels)
+        for c in np.unique(labels_np):
+            if c != -1:
+                # Check mean from our GPU vector
+                c_mean = means_vec[c + 1].item()
+                if c_mean < self.Trauma_Threshold:
+                    mask = (labels_np == c)
+                    trauma_points = flat_features[mask]
+
+                    if len(trauma_points) > 5:
+                        mu = torch.tensor(trauma_points.mean(axis=0), dtype=torch.float32).to(self.device)
+                        sigma = torch.tensor(trauma_points.std(axis=0) + 1e-4, dtype=torch.float32).to(self.device)
+                        
+                        severity = abs(c_mean)
+                        mu_pos = flat_pos[mask].mean(axis=0)
+                        sigma_pos_x = max(float(flat_pos[mask][:, 0].std()), 0.1)
+                        sigma_pos_y = max(float(flat_pos[mask][:, 1].std()), 0.1)
+
+                        self.trauma_centers.append({
+                            'mu': mu, 'sigma': sigma, 'mu_pos': mu_pos,          
+                            'sigma_pos_x': sigma_pos_x, 'sigma_pos_y': sigma_pos_y,   
+                            'weight': severity
+                        })
+                        
+                        if len(self.trauma_centers) > 200:
+                            self.trauma_centers.pop(0)
+                        else:
+                            print(f"[Memory] Trauma center added. Total: {len(self.trauma_centers)}")
+        
+        return advantages
+
     def _compute_advantages(self, labels, traj_lengths, all_features_np, all_pos_np):
+        # 1. Compute Returns-to-Go on GPU
         all_returns_to_go = []
         for i in range(len(self.actors)):
             rewards = self.buffer.get_latest_trajectory(i)["reward"]
@@ -251,69 +386,90 @@ class AGRPO:
             all_returns_to_go.append(rtg)
 
         flat_returns = torch.cat(all_returns_to_go)
-        labels_t = torch.from_numpy(labels).to(self.device)
+        labels_t = torch.from_numpy(labels).to(self.device).long()
 
-        unique_labels = torch.unique(labels_t)
-        cluster_means = {}
+        # 2. Vectorized Cluster Means (Returns) on GPU
+        # Index 0: Noise (-1), Index 1+: Clusters (0, 1, ...)
+        max_label = int(labels.max())
+        means_vec = torch.zeros(max_label + 2, device=self.device)
+        
+        # Calculate global mean for noise (label -1)
+        means_vec[0] = flat_returns.mean()
+        
+        # Calculate mean return for each cluster
+        unique_labels_t = torch.unique(labels_t)
+        cluster_means_dict = {} # Keep a copy for trauma filtering
+        
+        for c in unique_labels_t:
+            c_val = int(c.item())
+            # GPU Masking for mean calculation
+            m = flat_returns[labels_t == c_val].mean()
+            means_vec[c_val + 1] = m
+            if c_val != -1:
+                cluster_means_dict[c_val] = m.item()
 
-        global_mean = flat_returns.mean()
-        for c in unique_labels:
-            c_item = c.item()
-            if c_item != -1:
-                cluster_means[c_item] = flat_returns[labels_t == c].mean()
+        # 3. Vectorized Baseline Expansion and Advantages
+        # O(1) mapping of labels to their respective cluster means on GPU
+        flat_baselines = means_vec[labels_t + 1]
+        flat_advantages = flat_returns - flat_baselines
+        
+        # Split back into individual trajectories
+        advantages = list(torch.split(flat_advantages, traj_lengths))
 
-        cluster_means[-1] = global_mean
-
-        advantages = []
-        start = 0
-        for i, length in enumerate(traj_lengths):
-            policy_labels = labels[start:start+length]
-            policy_labels_t = labels_t[start:start+length]
-            baseline = torch.tensor([cluster_means.get(int(l), cluster_means.get(-1, 0.0)) for l in policy_labels], dtype=torch.float32).to(self.device)
-            adv = all_returns_to_go[i] - baseline
-            advantages.append(adv)
-            start += length
-
+        # 4. Trauma Management (Identification & Merging)
         flat_features = np.concatenate(all_features_np, axis=0)
         flat_pos = np.concatenate(all_pos_np, axis=0)
-        labels_np = labels  
-
-        unique_labels = np.unique(labels_np)
-        for c in unique_labels:
-            if c != -1 and cluster_means.get(c, 0) < self.Trauma_Threshold:
-                
+        dim = self.actors[0].extractor.feature_dim
+        
+        labels_np = labels
+        unique_labels_np = np.unique(labels_np)
+        
+        for c in unique_labels_np:
+            # Check if cluster mean return is below threshold
+            if c != -1 and cluster_means_dict.get(int(c), 0.0) < self.Trauma_Threshold:
                 mask = (labels_np == c)
                 trauma_points = flat_features[mask]
 
                 if len(trauma_points) > 5:
-                    mu = torch.tensor(trauma_points.mean(axis=0), dtype=torch.float32).to(self.device)
-                    # + 1e-4 für numerische Stabilität
+                    # Calculate new trauma candidates (Latent & Spatial)
+                    mu_feat = torch.tensor(trauma_points.mean(axis=0), dtype=torch.float32).to(self.device)
+                    sigma_feat = torch.tensor(trauma_points.std(axis=0) + 1e-4, dtype=torch.float32).to(self.device)
+                    severity = abs(cluster_means_dict[int(c)])
                     
-                    sigma = torch.tensor(trauma_points.std(axis=0) + 1e-4, dtype=torch.float32).to(self.device)
-                    
-                    severity = abs(cluster_means[c])
                     mu_pos = flat_pos[mask].mean(axis=0)
-                    
-                    sigma_pos_x = flat_pos[mask][:, 0].std()
-                    sigma_pos_y = flat_pos[mask][:, 1].std()
-                    
-                    if sigma_pos_x < 0.1: sigma_pos_x = 0.1
-                    if sigma_pos_y < 0.1: sigma_pos_y = 0.1
+                    sigma_pos_x = max(float(flat_pos[mask][:, 0].std()), 0.1)
+                    sigma_pos_y = max(float(flat_pos[mask][:, 1].std()), 0.1)
 
-                    self.trauma_centers.append({
-                        'mu': mu,
-                        'sigma': sigma,
+                    new_trauma_data = {
+                        'mu': mu_feat, 
+                        'sigma': sigma_feat, 
                         'mu_pos': mu_pos,          
-                        'sigma_pos_x': sigma_pos_x,
+                        'sigma_pos_x': sigma_pos_x, 
                         'sigma_pos_y': sigma_pos_y,   
                         'weight': severity
-                    })
-                    # print(f"[Memory] Trauma saved! Weight: {severity:.2f}, Score: {len(trauma_points)}")
+                    }
 
+                    # Check for overlap with existing centers (Latent Space Reinforcement)
+                    merged = False
+                    for existing in self.trauma_centers:
+                        # Distance in latent space normalized by feature dimensions
+                        dist_sq = torch.sum(((mu_feat - existing['mu']) / existing['sigma']) ** 2) / dim
+                        
+                        # If within 1.0 standard deviation in feature space, we update the old one
+                        if dist_sq < 1.0:
+                            existing.update(new_trauma_data)
+                            merged = True
+                            # Optional: Log the reinforcement
+                            # print(f"[Memory] Trauma reinforced. New Weight: {severity:.2f}")
+                            break
+                    
+                    if not merged:
+                        self.trauma_centers.append(new_trauma_data)
+                        print(f"[Memory] New trauma center added. Total: {len(self.trauma_centers)}")
+
+                    # Maintain memory cap
                     if len(self.trauma_centers) > 200:
                         self.trauma_centers.pop(0)
-                    else:
-                        print(f"[Memory] Trauma center added. Total centers: {len(self.trauma_centers)}")
         
         return advantages
 
@@ -324,7 +480,8 @@ class AGRPO:
             return torch.tensor(0.0).to(self.device)
 
         total_penalty = torch.tensor(0.0).to(self.device)
-        bandwidth = 1.0                                             # Controls how quickly the penalty falls off with distance
+        bandwidth = 20.0                                             # Controls how quickly the penalty falls off with distance
+        dim = self.actors[0].extractor.feature_dim
 
         for center in self.trauma_centers:
             mu = center['mu']
@@ -333,7 +490,8 @@ class AGRPO:
 
             dist_sq = torch.sum(((feat - mu) / sigma) ** 2, dim=-1)
 
-            gauss_penalty = torch.exp(-dist_sq / (2 * (bandwidth ** 2)))
+            normalized_dist = dist_sq / dim
+            gauss_penalty = torch.exp(-normalized_dist / (2 * (bandwidth ** 2)))
 
             total_penalty += (gauss_penalty * weight).mean()
 
@@ -377,6 +535,13 @@ class AGRPO:
             "div_loss": 0.0,
             "trauma_loss": 0.0
         }
+
+        # 1. Decay existing traumas by 20%
+        for center in self.trauma_centers:
+            center['weight'] *= 0.8
+            
+        # 2. Clean up "forgotten" traumas (e.g., weight below 1.0)
+        self.trauma_centers = [c for c in self.trauma_centers if c['weight'] > self.trauma_forgeting_threshold]
 
         for i in range(len(self.actors)):
             self.old_actors[i].load_state_dict(self.actors[i].state_dict())
