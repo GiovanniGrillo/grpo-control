@@ -13,7 +13,6 @@ from hdbscan import HDBSCAN
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import utils as bf
-import collections
 
 class AGRPO:
     """
@@ -41,16 +40,13 @@ class AGRPO:
         self.dbscan_eps = dbscan_eps
         self.plot_interval = plot_interval  # Plot frequency (every N updates)
 
+        # Warmup and Exploration Control
         self.running_reward_std = 1.0 # Initial guess
         self.warmup_episodes = warmup_episodes
         self.std_history = []
         self.target_min_std_history = []
         self.target_max_std_history = []
         
-        # Rolling window for  Trauma-Statistics
-        self.return_mean_history = collections.deque(maxlen=20)
-        self.return_std_history = collections.deque(maxlen=20)
-
         # Trauma Management Parameters
         self.dynamic_threshold = initial_threshold
         self.trauma_centers = []
@@ -236,7 +232,12 @@ class AGRPO:
     # ADVANTAGES & TRAUMA MANAGEMENT
     # =========================================================================
 
-    def _compute_advantages(self, labels, traj_lengths, all_features_np, all_pos_np, dynamic_threshold, reward_scale, returns):
+    def _compute_advantages(self, labels, traj_lengths, all_features_np, all_pos_np, pop_mean, reward_scale):
+        """
+        Calculates context-specific advantages using GPU vectorization and manages the Trauma memory.
+        Trauma centers are recorded or reinforced if a context yields severe negative returns.
+        """
+        K_selector = 0.8 # Multiplier to determine trauma severity threshold based on population performance
         # 1. Compute Returns-to-Go on GPU
         all_returns_to_go = []
         for i in range(len(self.actors)):
@@ -247,58 +248,48 @@ class AGRPO:
         flat_returns = torch.cat(all_returns_to_go)
         labels_t = torch.from_numpy(labels).to(self.device).long()
 
-        # 2. Vectorized Cluster Means
+        # 2. Vectorized Cluster Means (Returns) on GPU
+        # Index 0: Noise (-1), Index 1+: Clusters (0, 1, ...)
         max_label = int(labels.max())
         means_vec = torch.zeros(max_label + 2, device=self.device)
-        means_vec[0] = flat_returns.mean()
+        means_vec[0] = flat_returns.mean() # Global mean for noise
         
+        cluster_means_dict = {} 
         for c in torch.unique(labels_t):
             c_val = int(c.item())
             m = flat_returns[labels_t == c_val].mean()
             means_vec[c_val + 1] = m
+            if c_val != -1:
+                cluster_means_dict[c_val] = m.item()
 
-        # 3. Vectorized Advantages
+        # 3. Vectorized Baseline Expansion and Advantages
         flat_baselines = means_vec[labels_t + 1]
         flat_advantages = flat_returns - flat_baselines
         advantages = list(torch.split(flat_advantages, traj_lengths))
 
-        # 4. Trauma Management (Temporal Crash Locator mit angepasster Distanz)
+        # 4. Trauma Management (Identification & Merging)
+        flat_features = np.concatenate(all_features_np, axis=0)
+        flat_pos = np.concatenate(all_pos_np, axis=0)
         dim = self.actors[0].extractor.feature_dim
-        max_weight = 100.0 * reward_scale 
-        self.dynamic_threshold = dynamic_threshold
+        
+        self.dynamic_threshold = pop_mean - (K_selector * reward_scale)
+        max_weight = 100 * reward_scale # 1.0 / max(1e-6, self.lam_t)
+        labels_np = labels
+        for c in np.unique(labels_np):
+            # Check if cluster mean return crosses the severity threshold
+            c_return = cluster_means_dict.get(int(c), 0.0)
+            if c != -1 and c_return < self.dynamic_threshold:
+                mask = (labels_np == c)
+                trauma_points = flat_features[mask]
 
-        for i in range(len(self.actors)):
-            traj_return = returns[i]
-
-            # TRIGGER: War die Episode signifikant schlechter als das 20-Episoden-Rolling-Window?
-            if traj_return < self.dynamic_threshold:
-                
-                rewards = np.array(self.buffer.get_latest_trajectory(i)["reward"])
-                positive_indices = np.where(rewards > 0)[0]
-
-                if len(positive_indices) > 0:
-                    last_good_step = positive_indices[-1]
-                    start_idx = max(0, last_good_step - 5)
-                    end_idx = min(len(rewards), last_good_step + 15)
-                else:
-                    start_idx = 0
-                    end_idx = min(len(rewards), 20)
-
-                trauma_points = all_features_np[i][start_idx:end_idx]
-                trauma_pos = all_pos_np[i][start_idx:end_idx]
-
-                if len(trauma_points) > 2:
+                if len(trauma_points) > 5:
                     mu_feat = torch.tensor(trauma_points.mean(axis=0), dtype=torch.float32).to(self.device)
+                    sigma_feat = torch.tensor(trauma_points.std(axis=0) + 1e-4, dtype=torch.float32).to(self.device)
+                    severity = abs(c_return - self.dynamic_threshold)
                     
-                    # WICHTIG: clamp(min=0.1) rettet die Mathematik vor Division durch 0!
-                    # Die Form bleibt erhalten, aber sie wird nicht unendlich spitz.
-                    sigma_feat = torch.tensor(trauma_points.std(axis=0), dtype=torch.float32).to(self.device).clamp(min=0.1)
-                    
-                    severity = abs(traj_return - self.dynamic_threshold)
-
-                    mu_pos = trauma_pos.mean(axis=0)
-                    sigma_pos_x = max(float(trauma_pos[:, 0].std()), 0.1)
-                    sigma_pos_y = max(float(trauma_pos[:, 1].std()), 0.1)
+                    mu_pos = flat_pos[mask].mean(axis=0)
+                    sigma_pos_x = max(float(flat_pos[mask][:, 0].std()), 0.1)
+                    sigma_pos_y = max(float(flat_pos[mask][:, 1].std()), 0.1)
 
                     new_trauma_data = {
                         'mu': mu_feat, 'sigma': sigma_feat, 'mu_pos': mu_pos,          
@@ -306,21 +297,22 @@ class AGRPO:
                         'weight': min(severity, max_weight)
                     }
 
-                    # Merging mit deiner originalen elliptischen Mahalanobis-Distanz
+                    # Reinforce existing traumas if the new hazard is in the same latent area
                     merged = False
                     if self.trauma_centers:
                         trauma_mus = torch.stack([t['mu'] for t in self.trauma_centers])
                         trauma_sigmas = torch.stack([t['sigma'] for t in self.trauma_centers])
-                        
-                        # Deine Original-Formel (angepasst durch sigma)
                         dist_sq = torch.sum(((mu_feat.unsqueeze(0) - trauma_mus) / trauma_sigmas) ** 2, dim=-1) / dim
                         min_idx = torch.argmin(dist_sq).item()
 
-                        if dist_sq[min_idx] < 1.0: 
+                        if dist_sq[min_idx] < 1.0:
                             existing = self.trauma_centers[min_idx]
+                            # Accumulate weights (Gravity effect)
                             existing['weight'] += min(existing['weight'] + severity, max_weight)
+                            # Average positions and features (Centering)
                             existing['mu'] = (existing['mu'] + mu_feat) / 2
                             existing['mu_pos'] = (existing['mu_pos'] + mu_pos) / 2
+                            # Average standard deviations (Smoothing)
                             existing['sigma'] = (existing['sigma'] + sigma_feat) / 2
                             existing['sigma_pos_x'] = (existing['sigma_pos_x'] + sigma_pos_x) / 2
                             existing['sigma_pos_y'] = (existing['sigma_pos_y'] + sigma_pos_y) / 2
@@ -328,16 +320,14 @@ class AGRPO:
 
                     if not merged:
                         self.trauma_centers.append(new_trauma_data)
+                        print(f"[Trauma] New trauma center added at cluster {c} with severity {severity:.2f} and weight {new_trauma_data['weight']:.2f}. Total centers: {len(self.trauma_centers)}")
 
-                    # LIVE FEEDBACK PRINT
-                    action_str = "🔄 reinforced" if merged else "⚠️ Newly created"
-                    print(f"   [Trauma] Agent {i} | Return: {traj_return:.1f} (Limit: {self.dynamic_threshold:.1f}) | Severity: {severity:.1f} -> {action_str}")
-
+                    # Maintain memory cap
                     if len(self.trauma_centers) > 200:
                         self.trauma_centers.pop(0)
-
+        
         return advantages
-    
+
     def _compute_trauma_penalty(self, feat):
         """
         Calculates a repulsion penalty based on the Gaussian distance of current features 
@@ -355,12 +345,13 @@ class AGRPO:
 
             dist_sq = torch.sum(((feat - mu) / sigma) ** 2, dim=-1)
             normalized_dist = dist_sq / dim
-            
+            # print(normalized_dist)
+
             gauss_penalty = torch.exp(-normalized_dist / (2 * (bandwidth ** 2)))
             total_penalty += (gauss_penalty * weight).mean()
 
         return total_penalty
-    
+
     def _compute_exp_diversity(self, i, all_mus, current_lam_d):
         """Calculates an exponential penalty if agent policies become too similar (collapsing)."""
         if current_lam_d <= 0:
@@ -428,13 +419,10 @@ class AGRPO:
         - Balances penalties (Trauma/Diversity) against Reward Scale via EMA.
         - Triggers trauma memory based on statistical Z-score outliers.
         '''
-
-        # v4: std_start --> 0.8, std_warmup_end --> 0.4, std_max_floor --> 0.25
-
         ep = getattr(self, 'current_episode', 0)
         
         # 1. EXPONENTIAL DECAY (Half-life 100 episodes)
-        std_start, std_warmup_end, std_final_floor = 0.8, 0.4, 0.05
+        std_start, std_warmup_end, std_final_floor = 0.5, 0.2, 0.05
         if ep < self.warmup_episodes:
             # Linear decay during warmup
             min_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * (std_start - std_warmup_end)) 
@@ -444,13 +432,13 @@ class AGRPO:
             time_passed = ep - self.warmup_episodes
             min_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-decay_lambda * time_passed)
         
-        max_warmup = 4 * self.warmup_episodes
-        std_max_floor = std_final_floor + 0.2
+        double_warmup = 2 * self.warmup_episodes
+        std_max_floor = std_final_floor + 0.05 
 
-        if ep < max_warmup:
+        if ep < double_warmup:
             max_std = std_start 
         else:
-            time_passed_max = ep - max_warmup
+            time_passed_max = ep - double_warmup
             max_std = std_max_floor + (std_start - std_max_floor) * np.exp(-decay_lambda * time_passed_max)
             
         max_std = max(max_std, min_std + 1e-3)
@@ -486,35 +474,31 @@ class AGRPO:
         phi, returns, features_np, all_pos_np = self._gather_metrics()
         labels, traj_lengths = self._cluster_states(features_np, all_pos_np)
 
-        # 4. STATISTICAL CALIBRATION (Rolling Window Trigger)
+        # 4. STATISTICAL CALIBRATION (Reward Scaling & Trauma Trigger)
+        # Global RTG stats for the Trauma-Z-Score-Trigger
+        flat_rtgs = torch.cat(all_rtg_lists)
+        global_rtg_mean = flat_rtgs.mean().item()
+        global_rtg_std = flat_rtgs.std().item()
+
+        # EMA Reward Scaler (Relative signal strength of the environment)
         current_returns = np.array(returns)
-        
-        # A. Add to history
-        self.return_mean_history.append(np.mean(current_returns))
-        self.return_std_history.append(np.std(current_returns))
-
-        # B. Calculate dynamic threshold
-        if ep < self.warmup_episodes:
-            dynamic_threshold = -float('inf') 
-        else:
-            roll_mean = np.mean(self.return_mean_history)
-            roll_std = np.mean(self.return_std_history)
-            dynamic_threshold = roll_mean - (1.0 * roll_std)
-
-        # C. Reward Scaler for Penalties
         current_std = np.std(current_returns)
         if current_std > 1e-4:
             self.running_reward_std = 0.9 * self.running_reward_std + 0.1 * current_std
-        reward_scale = self.running_reward_std 
+        reward_scale = self.running_reward_std # This keeps penalties in sync with rewards
 
         # 5. DYNAMIC TRAUMA MEMORY MANAGEMENT
         for center in self.trauma_centers:
-            center['weight'] *= 0.99
-        forget_limit = reward_scale / 10.0
+            center['weight'] *= 0.9                     # 0.9 standard value
+
+        # Forget trauma if its potential loss impact falls below 1/100 of reward scale
+        forget_limit = reward_scale / 100.0              # Standard value: 1/10th of reward scale
         self.trauma_centers = [c for c in self.trauma_centers if c['weight'] > forget_limit]
 
+        # Advantages with statistical baseline (using global RTG mean for Z-Score Trigger)
         advantages = self._compute_advantages(labels, traj_lengths, features_np, all_pos_np, 
-                                              dynamic_threshold, reward_scale, returns)
+                                              pop_mean=global_rtg_mean, reward_scale=reward_scale)
+
         # 6. POPULATION STRATEGY (Tier Ranking)
         sorted_indices = np.argsort(returns) 
         n_scouts = max(1, int(self.N * 0.10))

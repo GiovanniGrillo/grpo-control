@@ -131,7 +131,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             stats = agent.step(state, action, reward, next_state, episode_done, pos = pos)
             if stats is not None:
                 current_elite_score = stats.get("elite_mean", 0)
-                print(f"  [Loss] Actor: {stats['actor']:.4f} | Div: {stats['div']:.4f} | Trauma: {stats['trauma']:.4f}")
+                # print(f"  [Loss] Actor: {stats['actor']:.4f} | Div: {stats['div']:.4f} | Trauma: {stats['trauma']:.4f}")
 
             state = next_state
             # state, ep_reward = next_state, ep_reward + reward                    
