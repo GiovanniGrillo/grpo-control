@@ -22,3 +22,8 @@ Thumbs.db
 *.bak
 *.backup
 /backups/
+
+# Workstation connections
+sdumelih/
+sdurobin/
+*.pth

@@ -1,0 +1,18 @@
+{
+    "Algorithm": "AGRPO",
+    "Environment": "CarRacing-v3",
+    "RUN_MODE": "full",
+    "MAX_EPISODES": 1000,
+    "MAX_STEPS": 1000,
+    "SKIP_STEPS": 4,
+    "NUM_SEEDS": 5,
+    "Master_Seeds": [
+        7270,
+        860,
+        5390,
+        5191,
+        5734
+    ],
+    "OS": "Linux",
+    "Description": "Fixed parameter run with exhaustive component tracking."
+}
