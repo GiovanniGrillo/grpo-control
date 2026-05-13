@@ -534,6 +534,8 @@ class AGRPO:
             "tier_elite_action_std": safe_mean_std_action(elite_idx),
             "tier_mid_action_std": safe_mean_std_action(mid_idx),
             "tier_scout_action_std": safe_mean_std_action(scout_idx),
+            "target_min_std": min_std,       
+            "target_max_std": max_std,       
             "elite_mean": np.mean(elite_stats)
         }
         return stats_dict
@@ -568,10 +570,11 @@ class AGRPO:
         plt.savefig('state_space_clustered.png')
         plt.close()
 
-    def save_checkpoint(self, path, ep, eval_rewards):
+    def save_checkpoint(self, path, ep, eval_rewards, seed_logs=None):
         checkpoint = {
             'episode': ep,
             'eval_rewards': eval_rewards,
+            'seed_logs': seed_logs if seed_logs is not None else [], # NEU: Telemetrie speichern
             'current_policy_idx': self.current_policy_idx,
             'actors_state_dict': self.actors.state_dict(),
             'old_actors_state_dict': self.old_actors.state_dict(),
@@ -587,7 +590,8 @@ class AGRPO:
 
     def load_checkpoint(self, path):
         if not os.path.exists(path):
-            return {'episode': 0, 'eval_rewards': []}
+            return {'episode': 0, 'eval_rewards': [], 'seed_logs': []}
+        
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.actors.load_state_dict(ckpt['actors_state_dict'])
         self.old_actors.load_state_dict(ckpt['old_actors_state_dict'])
@@ -596,9 +600,12 @@ class AGRPO:
             opt.load_state_dict(state)
         self.current_policy_idx = ckpt['current_policy_idx']
         self.buffer.buffers = ckpt['buffer_data']
+        
         if ckpt.get('current_episodes') is not None:
             self.buffer.current_episodes = ckpt['current_episodes']
+            
         self.trauma_centers = ckpt.get('trauma_centers', [])
         self.scaler = ckpt.get('scaler', StandardScaler())
         self.pca = ckpt.get('pca', None)
+        
         return ckpt

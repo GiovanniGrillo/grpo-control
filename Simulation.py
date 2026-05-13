@@ -30,7 +30,8 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, skip_steps, RECOVERY, checkpoint_dir):
-    final_path = os.path.join(checkpoint_dir, f"{env_name}_{algo_name}_s{seed}_final.pth")
+    safe_env_name = env_name.replace("/", "_")
+    final_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_final.pth")
     if RECOVERY and os.path.exists(final_path):
         print(f"Skipping Seed {seed} - already finished.")
         try:
@@ -63,7 +64,6 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     
     print(f"\n--- Starting run with seed {seed_idx}/{total_seeds} ---")
 
-    safe_env_name = env_name.replace("/", "_")
     ckpt_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_last.pth")
     
     if algo_name in ["CGRPO", "AGRPO"]:
@@ -73,7 +73,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     
     start_episode = 0
     eval_rewards = []
-    seed_logs = [] # NEW: Collects episode telemetry
+    seed_logs = [] 
 
     current_elite_score = 0.0
 
@@ -82,6 +82,8 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         checkpoint_data = agent.load_checkpoint(ckpt_path)
         start_episode = checkpoint_data.get('episode', 0) + 1
         eval_rewards = checkpoint_data.get('eval_rewards', [])
+        
+        seed_logs = checkpoint_data.get('seed_logs', []) 
         print(f"Resuming from Episode {start_episode}")
 
     print(f"\n--- Run: {algo_name} | Seed: {seed} ---")
@@ -138,7 +140,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         eval_rewards.append(eval_ep_reward)
 
         if ep > 0 and ep % 100 == 0:
-            agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards)
+            agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards, seed_logs=seed_logs)
             print(f"Checkpoint saved at Episode {ep}")
 
         step_time = time.time() - seed_time
@@ -154,7 +156,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             **update_stats
         })
 
-    agent.save_checkpoint(final_path, ep=MAX_EPISODES-1, eval_rewards=eval_rewards) 
+    agent.save_checkpoint(final_path, ep=MAX_EPISODES-1, eval_rewards=eval_rewards, seed_logs=seed_logs) 
     env.close()
     eval_env.close()
     return eval_rewards, seed_logs
@@ -165,7 +167,8 @@ if __name__ == '__main__':
     except RuntimeError:
         pass
 
-    DEFAULT_ENV_NAMES = ["CarRacing-v3"]
+    DEFAULT_ENV_NAMES = ["dm_control/cartpole-swingup-v0", 
+        "dm_control/acrobot-swingup-v0", "CarRacing-v3"]
     ENVS_REGISTRY = {
         "dm_control/cartpole-swingup-v0": "Cartpole",
         "dm_control/acrobot-swingup-v0": "Acrobot",

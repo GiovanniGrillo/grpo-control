@@ -56,13 +56,9 @@ class ExperimentLogger:
         self.metrics.append(log_entry)
         
     def save_metrics(self):
-        """Exports the collected metrics to JSON and a flat CSV."""
-        json_path = os.path.join(self.run_dir, "metrics.json")
+        """Exports the collected metrics exclusively to a flat CSV."""
         csv_path = os.path.join(self.run_dir, "metrics.csv")
         
-        with open(json_path, 'w') as f:
-            json.dump(self.metrics, f, indent=4)
-            
         df = pd.DataFrame(self.metrics)
         df.to_csv(csv_path, index=False)
         
