@@ -19,7 +19,7 @@ class AGRPO:
     """
     Advanced Group Relative Policy Optimization (AGRPO).
     """
-    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=10, K=2, epsilon=0.2,
+    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=50, K=2, epsilon=0.2,
                  tau=0.5, lam_s=0.01, lam_d=0.05, lam_t=0.05, gamma=0.99, dbscan_eps=0.4,
                  warmup_episodes=100, initial_threshold=-1.0, plot_interval=10):
 
@@ -110,7 +110,7 @@ class AGRPO:
         return self.last_elite_rewards
 
     def _gather_metrics(self):
-        all_phi, all_returns, all_features_np, all_pos_np = [], [], [], []
+        all_phi, all_features_np, all_pos_np = [], [], [] 
         for i in range(len(self.actors)):
             traj = self.buffer.get_latest_trajectory(i)
             obs = torch.stack(traj["obs"]).to(self.device)
@@ -130,10 +130,10 @@ class AGRPO:
                 ])
 
             all_phi.append(phi_i)
-            all_returns.append(reward_sum)
             all_features_np.append(torch.stack(traj["feature"]).cpu().numpy())
             all_pos_np.append(np.array(traj["pos"]))
-        return np.array(all_phi), all_returns, all_features_np, all_pos_np
+            
+        return np.array(all_phi), all_features_np, all_pos_np
 
     def _cluster_states(self, all_features_np, all_pos_np):
         flat_features = np.concatenate(all_features_np, axis=0)
@@ -345,7 +345,7 @@ class AGRPO:
             min_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-decay_lambda * time_passed)
         
         max_warmup = 4 * self.warmup_episodes
-        std_max_floor = std_final_floor + 0.2
+        std_max_floor = std_final_floor + 0.5
 
         if ep < max_warmup:
             max_std = std_start 
@@ -358,13 +358,27 @@ class AGRPO:
 
         all_rtg_lists = []
         returns_for_ranking = [sum(self.buffer.get_latest_trajectory(idx)["reward"]) for idx in range(self.N)]
-        elite_idx_prep = np.argsort(returns_for_ranking)[-max(1, int(self.N * 0.10)):]
 
+        sorted_indices = np.argsort(returns_for_ranking)
+        n_scouts = max(1, int(self.N * 0.10))
+        n_elite = max(1, int(self.N * 0.10))
+
+        elite_idx = sorted_indices[-n_elite:]
+        scout_idx = sorted_indices[:n_scouts]
+        n_mid = int((self.N - n_scouts - n_elite) / 2)
+        
+        reset_idx = sorted_indices[n_scouts : n_scouts + (self.N - n_scouts - n_mid - n_elite)]
+        mid_idx = sorted_indices[-(n_elite + n_mid) : -n_elite]
+        
         with torch.no_grad():
             sum_actual_std = 0
             for i in range(len(self.actors)):
                 self.old_actors[i].load_state_dict(self.actors[i].state_dict())
-                if i not in elite_idx_prep:
+                if i in scout_idx:
+                    self.actors[i].log_std.clamp_(min=np.log(0.6), max=np.log(0.8))
+                elif i in elite_idx:
+                    self.actors[i].log_std.clamp_(min=np.log(1e-3), max=np.log(max_std))
+                else:
                     self.actors[i].log_std.clamp_(min=np.log(min_std), max=np.log(max_std))
                 sum_actual_std += torch.exp(self.actors[i].log_std).mean().item()
                 
@@ -375,10 +389,10 @@ class AGRPO:
             self.target_min_std_history.append(min_std)
             self.target_max_std_history.append(max_std)
 
-        phi, returns, features_np, all_pos_np = self._gather_metrics()
+        phi, features_np, all_pos_np = self._gather_metrics()
         labels, traj_lengths = self._cluster_states(features_np, all_pos_np)
 
-        current_returns = np.array(returns)
+        current_returns = np.array(returns_for_ranking)
         self.return_mean_history.append(np.mean(current_returns))
         self.return_std_history.append(np.std(current_returns))
 
@@ -400,17 +414,7 @@ class AGRPO:
         self.trauma_centers = [c for c in self.trauma_centers if c['weight'] > forget_limit]
 
         advantages = self._compute_advantages(labels, traj_lengths, features_np, all_pos_np, 
-                                              dynamic_threshold, reward_scale, returns)
-        
-        sorted_indices = np.argsort(returns) 
-        n_scouts = max(1, int(self.N * 0.10))
-        n_elite = max(1, int(self.N * 0.10))
-        n_mid = int((self.N - n_scouts - n_elite) / 2)
-        
-        scout_idx = sorted_indices[:n_scouts]
-        reset_idx = sorted_indices[n_scouts : n_scouts + (self.N - n_scouts - n_mid - n_elite)]
-        mid_idx = sorted_indices[-(n_elite + n_mid) : -n_elite]
-        elite_idx = sorted_indices[-n_elite:]
+                                              dynamic_threshold, reward_scale, returns_for_ranking)
 
         phi_norm = (phi - phi.mean(axis=0)) / (phi.std(axis=0) + 1e-8)
         groups = KMeans(n_clusters=min(self.K, len(self.actors)), n_init='auto').fit_predict(phi_norm)
