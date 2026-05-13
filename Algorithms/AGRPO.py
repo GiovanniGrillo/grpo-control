@@ -21,7 +21,7 @@ class AGRPO:
     """
     def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=10, K=2, epsilon=0.2,
                  tau=0.5, lam_s=0.01, lam_d=0.05, lam_t=0.05, gamma=0.99, dbscan_eps=0.4,
-                 warmup_episodes=100, initial_threshold=-1.0, plot_interval=20):
+                 warmup_episodes=100, initial_threshold=-1.0, plot_interval=10):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
@@ -137,7 +137,7 @@ class AGRPO:
 
     def _cluster_states(self, all_features_np, all_pos_np):
         flat_features = np.concatenate(all_features_np, axis=0)
-        subsample_idx = np.arange(0, len(flat_features), 20) 
+        subsample_idx = np.arange(0, len(flat_features), 10) 
         features_subsampled = flat_features[subsample_idx]
         scaled_sub = self.scaler.fit_transform(features_subsampled)
 

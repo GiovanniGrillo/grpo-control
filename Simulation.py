@@ -66,10 +66,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
 
     ckpt_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_last.pth")
     
-    if algo_name in ["CGRPO", "AGRPO"]:
-        agent = AgentClass(env, N=10, K=2) 
-    else:
-        agent = AgentClass(env) 
+    agent = AgentClass(env) 
     
     start_episode = 0
     eval_rewards = []
