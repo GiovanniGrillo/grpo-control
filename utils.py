@@ -166,7 +166,11 @@ class ContinuousActor(nn.Module):
         self.extractor = FeatureExtractor(observation_space)
         self.action_dim = action_space.shape[0]
 
-        self.mean_head = nn.Linear(self.extractor.feature_dim, self.action_dim)
+        self.mean_head = nn.Sequential(
+            nn.Linear(self.extractor.feature_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, self.action_dim)
+        )
         self.log_std = nn.Parameter(torch.zeros(self.action_dim))
 
     def forward_features(self, obs):
