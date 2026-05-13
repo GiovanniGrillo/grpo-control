@@ -336,7 +336,7 @@ class AGRPO:
     def update(self):
         ep = getattr(self, 'current_episode', 0)
         
-        std_start, std_warmup_end, std_final_floor = 0.8, 0.4, 0.05
+        std_start, std_warmup_end, std_final_floor = 0.8, 0.6, 0.05
         if ep < self.warmup_episodes:
             min_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * (std_start - std_warmup_end)) 
         else:

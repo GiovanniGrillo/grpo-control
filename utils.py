@@ -164,17 +164,25 @@ class ContinuousActor(nn.Module):
     def __init__(self, observation_space, action_space, hidden_dim=256):
         super().__init__()
         self.extractor = FeatureExtractor(observation_space)
+        
+        if isinstance(action_space, gym.spaces.Discrete):
+            raise ValueError("ContinuousActor requires a continuous action space (Box).")
+            
         self.action_dim = action_space.shape[0]
 
-        self.mean_head = nn.Sequential(
-            nn.Linear(self.extractor.feature_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, self.action_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(self.extractor.feature_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
         )
+
+        self.mean_head = nn.Linear(hidden_dim, self.action_dim)
         self.log_std = nn.Parameter(torch.zeros(self.action_dim))
 
     def forward_features(self, obs):
-        return self.extractor(obs)
+        x = self.extractor(obs)
+        return self.mlp(x)
 
     def get_distribution(self, features):
         mean = torch.tanh(self.mean_head(features))
