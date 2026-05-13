@@ -345,7 +345,7 @@ class AGRPO:
             min_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-decay_lambda * time_passed)
         
         max_warmup = 4 * self.warmup_episodes
-        std_max_floor = std_final_floor + 0.5
+        std_max_floor = std_final_floor + 0.45
 
         if ep < max_warmup:
             max_std = std_start 
@@ -500,7 +500,7 @@ class AGRPO:
             self.actors, self.old_actors, self.optimizers = nn.ModuleList(survivor_actors), nn.ModuleList(survivor_old_actors), survivor_optimizers
             self.N = len(self.actors)
 
-        elite_stats = self._update_reference_policy_mixture(returns)
+        elite_stats = self._update_reference_policy_mixture(returns_for_ranking)
         self.buffer = bf.PopulationBuffer(self.N) 
 
         if (ep + 1) % self.plot_interval == 0:
