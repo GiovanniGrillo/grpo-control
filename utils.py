@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import gymnasium as gym
 import numpy as np
+import collections
+import random
 
 class CarRacingActionWrapper(gym.ActionWrapper):
     def __init__(self, env):
@@ -158,6 +160,67 @@ class PopulationBuffer:
 
     def clear_buffer(self):
         self.buffers = [[] for _ in range(self.N)]
+
+
+class TraumaReplayBuffer:
+    """
+    Persistent replay buffer for traumatic (failed) episodes.
+    Stores complete trajectories from episodes with return < threshold.
+    """
+    def __init__(self, max_size=5000, worst_percentile=15):
+        self.buffer = collections.deque(maxlen=max_size)
+        self.worst_percentile = worst_percentile
+    
+    def add(self, obs_list, action_list, feature_list, reward_list, traj_return):
+        """
+        Add a complete traumatic episode to buffer.
+        
+        Args:
+            obs_list: list of observations
+            action_list: list of actions
+            feature_list: list of feature embeddings
+            reward_list: list of rewards
+            traj_return: total return of trajectory
+        """
+        self.buffer.append({
+            'obs': obs_list,
+            'action': action_list,
+            'feature': feature_list,
+            'reward': reward_list,
+            'traj_return': traj_return
+        })
+    
+    def sample(self, batch_size):
+        """
+        Sample a minibatch from the worst returns (bottom percentile).
+        
+        Returns:
+            list of episodes
+        """
+        if len(self.buffer) == 0:
+            return []
+        
+        returns = np.array([e['traj_return'] for e in self.buffer])
+        threshold = np.percentile(returns, self.worst_percentile)
+        worst_episodes = [e for e in self.buffer if e['traj_return'] <= threshold]
+        
+        if len(worst_episodes) == 0:
+            return random.sample(list(self.buffer), min(batch_size, len(self.buffer)))
+        
+        return random.sample(worst_episodes, min(batch_size, len(worst_episodes)))
+    
+    def get_stats(self):
+        """Return statistics about the buffer."""
+        if len(self.buffer) == 0:
+            return {'size': 0, 'min_return': 0, 'max_return': 0, 'mean_return': 0}
+        
+        returns = np.array([e['traj_return'] for e in self.buffer])
+        return {
+            'size': len(self.buffer),
+            'min_return': float(returns.min()),
+            'max_return': float(returns.max()),
+            'mean_return': float(returns.mean())
+        }
 
 
 class ContinuousActor(nn.Module):
