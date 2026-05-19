@@ -56,12 +56,8 @@ class AGRPO:
 
         self.actors = nn.ModuleList([bf.ContinuousActor(env.observation_space, env.action_space, hidden_dim).to(self.device) for _ in range(N)])
         self.old_actors = nn.ModuleList([bf.ContinuousActor(env.observation_space, env.action_space, hidden_dim).to(self.device) for _ in range(N)])
-
-        self.num_elites = max(1, int(self.N // 10))
-        self.ref_actors = nn.ModuleList([bf.ContinuousActor(env.observation_space, env.action_space, hidden_dim).to(self.device) for _ in range(self.num_elites)])
-        for ref_actor in self.ref_actors:
-            ref_actor.load_state_dict(self.actors[0].state_dict())
-        self.ref_actor = self.ref_actors[0]
+        self.ref_actor = bf.ContinuousActor(env.observation_space, env.action_space, hidden_dim).to(self.device)
+        self.ref_actor.load_state_dict(self.actors[0].state_dict())
 
         for i in range(self.N):
             self.old_actors[i].load_state_dict(self.actors[i].state_dict())
@@ -69,7 +65,6 @@ class AGRPO:
         self.optimizers = [optim.Adam(actor.parameters(), lr=lr) for actor in self.actors]
         self.buffer = bf.PopulationBuffer(N)
         self.current_policy_idx = 0
-        self.updated = False
 
         self.scaler = StandardScaler()
         self.pca = None
@@ -78,9 +73,7 @@ class AGRPO:
         obs_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         with torch.no_grad():
             if evaluate:
-                # action_t = self.ref_actor.get_deterministic_action(obs_t)
-                actions = torch.stack([actor.get_deterministic_action(obs_t) for actor in self.ref_actors])
-                action_t = actions.mean(dim=0)
+                action_t = self.ref_actor.get_deterministic_action(obs_t)
             else:
                 action_t, log_prob_t, feat_t = self.old_actors[self.current_policy_idx].sample_action(obs_t)
                 self._cached_obs = obs_t.squeeze(0).cpu()
@@ -90,7 +83,7 @@ class AGRPO:
         return action_t.squeeze(0).cpu().numpy()
 
     def step(self, state, action, reward, next_state, done, pos=(0.0, 0.0)):
-        self.buffer.add(self.current_policy_idx, self._cached_obs, self._cached_feat,
+        self.buffer.add(self.current_policy_idx, self._cached_obs, self._cached_feat, 
                         self._cached_action, self._cached_logprob, reward, pos=pos)
         if done:
             self.buffer.finish_episode(self.current_policy_idx)
@@ -98,71 +91,48 @@ class AGRPO:
             if self.current_policy_idx >= len(self.actors):
                 stats = self.update()
                 self.current_policy_idx = 0
-                self.updated = True
                 return stats
         return None
 
-    def consume_update_flag(self):
-        """Check if an update has just occurred and reset the flag."""
-        if self.updated:
-            self.updated = False
-            return True
-        return False
-
     def _update_reference_policy_mixture(self, all_returns):
-        """Update ref_actor to be the average of similar elite policies (same valley)."""
         num_top = max(1, int(len(self.actors) // 10))
         top_indices = np.argsort(all_returns)[-num_top:]
         self.last_elite_rewards = [all_returns[i] for i in top_indices]
         self.last_elite_indices = top_indices
 
         with torch.no_grad():
-            for i, idx in enumerate(top_indices):
-                    if i < len(self.ref_actors):
-                        self.ref_actors[i].load_state_dict(self.actors[idx].state_dict())
-                
-            self.ref_actor = self.ref_actors[-1]
-            
+            avg_state_dict = {}
+            for name in self.actors[0].state_dict():
+                avg_state_dict[name] = torch.stack(
+                    [self.actors[idx].state_dict()[name] for idx in top_indices]
+                ).mean(dim=0)
+            self.ref_actor.load_state_dict(avg_state_dict) 
         return self.last_elite_rewards
 
     def _gather_metrics(self):
-        all_phi, all_features_np, all_pos_np = [], [], []
-
+        all_phi, all_features_np, all_pos_np = [], [], [] 
         for i in range(len(self.actors)):
             traj = self.buffer.get_latest_trajectory(i)
             obs = torch.stack(traj["obs"]).to(self.device)
-            actions = torch.stack(traj["action"]).to(self.device)
 
             with torch.no_grad():
                 feat = self.actors[i].forward_features(obs)
                 dist = self.actors[i].get_distribution(feat)
-                
-                obs_mean = obs.mean(dim=0).cpu().numpy()
-                obs_std = obs.std(dim=0).cpu().numpy()
-                
-                log_prob_i = dist.log_prob(actions).sum(dim=-1)
-                
-                elite_lps = []
-                for ref_act in self.ref_actors:
-                    ref_feat = ref_act.forward_features(obs)
-                    elite_lps.append(ref_act.get_distribution(ref_feat).log_prob(actions).sum(dim=-1))
-                
-                stacked_lps = torch.stack(elite_lps)
-                log_prob_ref = torch.logsumexp(stacked_lps, dim=0) - np.log(len(self.ref_actors))
-                
-                kl_div = (log_prob_i - log_prob_ref).mean().item()
+                ref_feat = self.ref_actor.forward_features(obs)
+                ref_dist = self.ref_actor.get_distribution(ref_feat)
                 reward_sum = sum(traj["reward"])
                 
-                phi_i = np.concatenate([
-                    obs_mean, 
-                    obs_std, 
-                    np.array([reward_sum / len(traj["reward"]), kl_div])
+                phi_i = np.array([
+                    reward_sum / len(traj["reward"]),
+                    dist.entropy().mean().item(),
+                    dist.variance.mean().item(),
+                    torch.distributions.kl_divergence(dist, ref_dist).mean().item()
                 ])
 
             all_phi.append(phi_i)
             all_features_np.append(torch.stack(traj["feature"]).cpu().numpy())
             all_pos_np.append(np.array(traj["pos"]))
-
+            
         return np.array(all_phi), all_features_np, all_pos_np
 
     def _cluster_states(self, all_features_np, all_pos_np):
@@ -363,63 +333,31 @@ class AGRPO:
         plt.savefig('plots/exploration_health.png')
         plt.close()
 
-    def _compute_trauma_loss(self, feat, role_lam_t, reward_scale):
-        """Compute trauma loss with easy on/off control via lam_t parameter.
-
-        Set lam_t=0.0 in __init__ to disable trauma completely.
-        Use role_lam_t for per-agent role-based scaling (elite=0, scout=high, mid=normal).
-        """
-        if role_lam_t <= 0:
-            return torch.tensor(0.0).to(self.device)
-        return role_lam_t * self._compute_trauma_penalty(feat) / reward_scale
-
-    def _set_action_std_for_role(self, actor, role, ep, min_std_mids):
-        """Set fixed action std based on role. Not trained, only controlled by role and time.
-
-        Scouts: Fixed 0.6 (after warmup)
-        Mids: Exponentially decay from 0.6 to 0.1
-        Elites: Decay 5× faster than mids (std_mids / 5)
-        """
-        actor.log_std.requires_grad = False
-
-        if ep < self.warmup_episodes:
-            target_std = 0.6
-        elif role == "scout":
-            target_std = 0.6
-        elif role == "elite":
-            target_std = min_std_mids / 5.0
-        else:
-            target_std = min_std_mids
-
-        actor.log_std.data.fill_(np.log(target_std))
-
     def update(self):
         ep = getattr(self, 'current_episode', 0)
-
+        
         std_start, std_warmup_end, std_final_floor = 0.8, 0.6, 0.05
         if ep < self.warmup_episodes:
-            min_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * (std_start - std_warmup_end))
+            min_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * (std_start - std_warmup_end)) 
         else:
             decay_lambda = 0.006931
             time_passed = ep - self.warmup_episodes
             min_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-decay_lambda * time_passed)
-
+        
         max_warmup = 4 * self.warmup_episodes
         std_max_floor = std_final_floor + 0.45
 
         if ep < max_warmup:
-            max_std = std_start
+            max_std = std_start 
         else:
             time_passed_max = ep - max_warmup
             max_std = std_max_floor + (std_start - std_max_floor) * np.exp(-decay_lambda * time_passed_max)
-
+            
         max_std = max(max_std, min_std + 1e-3)
         current_lam_d = self.lam_d * (min_std / 0.5) if ep >= self.warmup_episodes else 0.0
 
         all_rtg_lists = []
         returns_for_ranking = [sum(self.buffer.get_latest_trajectory(idx)["reward"]) for idx in range(self.N)]
-
-        elite_stats = self._update_reference_policy_mixture(returns_for_ranking)
 
         sorted_indices = np.argsort(returns_for_ranking)
         n_scouts = max(1, int(self.N * 0.10))
@@ -428,26 +366,22 @@ class AGRPO:
         elite_idx = sorted_indices[-n_elite:]
         scout_idx = sorted_indices[:n_scouts]
         n_mid = int((self.N - n_scouts - n_elite) / 2)
-
+        
         reset_idx = sorted_indices[n_scouts : n_scouts + (self.N - n_scouts - n_mid - n_elite)]
         mid_idx = sorted_indices[-(n_elite + n_mid) : -n_elite]
-
-        mid_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-0.006931 * max(0, ep - self.warmup_episodes))
-
+        
         with torch.no_grad():
             sum_actual_std = 0
             for i in range(len(self.actors)):
                 self.old_actors[i].load_state_dict(self.actors[i].state_dict())
-
                 if i in scout_idx:
-                    self._set_action_std_for_role(self.actors[i], "scout", ep, mid_std)
+                    self.actors[i].log_std.clamp_(min=np.log(0.6), max=np.log(0.8))
                 elif i in elite_idx:
-                    self._set_action_std_for_role(self.actors[i], "elite", ep, mid_std)
+                    self.actors[i].log_std.clamp_(min=np.log(1e-3), max=np.log(max_std))
                 else:
-                    self._set_action_std_for_role(self.actors[i], "mid", ep, mid_std)
-
+                    self.actors[i].log_std.clamp_(min=np.log(min_std), max=np.log(max_std))
                 sum_actual_std += torch.exp(self.actors[i].log_std).mean().item()
-
+                
                 traj_rewards = self.buffer.get_latest_trajectory(i)["reward"]
                 all_rtg_lists.append(bf.compute_returns_to_go(traj_rewards, self.gamma, self.device))
 
@@ -479,12 +413,11 @@ class AGRPO:
         forget_limit = reward_scale / 10.0
         self.trauma_centers = [c for c in self.trauma_centers if c['weight'] > forget_limit]
 
-        advantages = self._compute_advantages(labels, traj_lengths, features_np, all_pos_np,
+        advantages = self._compute_advantages(labels, traj_lengths, features_np, all_pos_np, 
                                               dynamic_threshold, reward_scale, returns_for_ranking)
 
         phi_norm = (phi - phi.mean(axis=0)) / (phi.std(axis=0) + 1e-8)
-        current_K = max(2, int(self.N / 15))
-        groups = KMeans(n_clusters=min(current_K, len(self.actors)), n_init='auto').fit_predict(phi_norm)
+        groups = KMeans(n_clusters=min(self.K, len(self.actors)), n_init='auto').fit_predict(phi_norm)
         normalized_advantages = bf.normalize_advantages_by_group(advantages, groups, self.device)
         sigma_global = torch.cat(normalized_advantages).std() + 1e-8
         group_members = {g: np.where(groups == g)[0] for g in np.unique(groups)}
@@ -500,64 +433,51 @@ class AGRPO:
             feat = self.actors[j].forward_features(obs)
             actor_features[j], all_mus[j] = feat, self.actors[j].get_distribution(feat).mean.detach()
 
-        with torch.no_grad():
-            cached_trajectories = {}
-            for i in range(len(self.actors)):
-                traj = self.buffer.get_latest_trajectory(i)
-                cached_trajectories[i] = {
-                    'obs': torch.stack(traj["obs"]).to(self.device),
-                    'actions': torch.stack(traj["action"]).to(self.device),
-                    'old_log_probs': torch.stack(traj["log_probs"]).to(self.device),
-                    'adv': normalized_advantages[i].to(self.device)
-                }
-
         loss_stats = {"actor_loss": 0.0, "smooth_loss": 0.0, "div_loss": 0.0, "trauma_loss": 0.0}
         updated_agents_count = 0
-        PPO_EPOCHS = 10
 
-        for epoch in range(PPO_EPOCHS):
-            for i in range(len(self.actors)):
-                if ep >= self.warmup_episodes and i in reset_idx: continue
-                if epoch == 0: updated_agents_count += 1
+        for i in range(len(self.actors)):
+            if ep >= self.warmup_episodes and i in reset_idx: continue
+            updated_agents_count += 1
 
-                if i in elite_idx:
-                    role_lam_d, role_lam_t = 0.0, 0.0
-                elif i in scout_idx:
-                    role_lam_d, role_lam_t = current_lam_d * 30.0, self.lam_t
-                else:
-                    role_lam_d, role_lam_t = current_lam_d, self.lam_t
+            if i in elite_idx:
+                role_lam_d, role_lam_t = 0.0, 0.0 
+            elif i in scout_idx:
+                role_lam_d, role_lam_t = current_lam_d * 30.0, self.lam_t 
+            else:
+                role_lam_d, role_lam_t = current_lam_d, self.lam_t 
 
-                cached = cached_trajectories[i]
-                obs = cached['obs']
-                actions = cached['actions']
-                old_log_probs = cached['old_log_probs']
-                adv = cached['adv']
+            traj = self.buffer.get_latest_trajectory(i)
+            obs = torch.stack(traj["obs"]).to(self.device)
+            actions = torch.stack(traj["action"]).to(self.device)
+            old_log_probs = torch.stack(traj["log_probs"]).to(self.device)
+            adv = normalized_advantages[i].to(self.device)
 
-                feat = self.actors[i].forward_features(obs)
-                dist = self.actors[i].get_distribution(feat)
-                new_log_probs = dist.log_prob(actions).sum(dim=-1)
+            feat = actor_features[i]
+            dist = self.actors[i].get_distribution(feat)
+            new_log_probs = dist.log_prob(actions).sum(dim=-1)
 
-                ratio = torch.exp(new_log_probs - old_log_probs)
-                epsilon_i = group_epsilons[groups[i]]
-                surr1 = ratio * adv
-                surr2 = torch.clamp(ratio, 1 - epsilon_i, 1 + epsilon_i) * adv
-                actor_loss = -torch.min(surr1, surr2).mean()
+            ratio = torch.exp(new_log_probs - old_log_probs)
+            epsilon_i = group_epsilons[groups[i]]
+            surr1 = ratio * adv
+            surr2 = torch.clamp(ratio, 1 - epsilon_i, 1 + epsilon_i) * adv
+            actor_loss = -torch.min(surr1, surr2).mean()
 
-                l_smooth = torch.mean((feat[1:] - feat[:-1]) ** 2) if feat.shape[0] > 1 else 0
-                l_div = self._compute_exp_diversity(i, all_mus, role_lam_d) / reward_scale
-                l_trauma = self._compute_trauma_loss(feat, role_lam_t, reward_scale)
+            l_smooth = torch.mean((feat[1:] - feat[:-1]) ** 2) if feat.shape[0] > 1 else 0
+            l_div = self._compute_exp_diversity(i, all_mus, role_lam_d) / reward_scale
+            l_trauma = role_lam_t * self._compute_trauma_penalty(feat) / reward_scale
 
-                total_loss = actor_loss + (self.lam_s * l_smooth) + l_div + l_trauma
+            total_loss = actor_loss + (self.lam_s * l_smooth) + l_div + l_trauma
 
-                self.optimizers[i].zero_grad()
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.actors[i].parameters(), 0.5)
-                self.optimizers[i].step()
+            self.optimizers[i].zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actors[i].parameters(), 0.5)
+            self.optimizers[i].step()
 
-                loss_stats["actor_loss"] += actor_loss.item() / PPO_EPOCHS
-                loss_stats["smooth_loss"] += (l_smooth.item() if torch.is_tensor(l_smooth) else l_smooth) / PPO_EPOCHS
-                loss_stats["div_loss"] += (l_div.item() if torch.is_tensor(l_div) else l_div) / PPO_EPOCHS
-                loss_stats["trauma_loss"] += (l_trauma.item() if torch.is_tensor(l_trauma) else l_trauma) / PPO_EPOCHS
+            loss_stats["actor_loss"] += actor_loss.item()
+            loss_stats["smooth_loss"] += l_smooth.item() if torch.is_tensor(l_smooth) else l_smooth
+            loss_stats["div_loss"] += l_div.item() if torch.is_tensor(l_div) else l_div
+            loss_stats["trauma_loss"] += l_trauma.item() if torch.is_tensor(l_trauma) else l_trauma
 
         if ep >= self.warmup_episodes:
             survivor_actors, survivor_old_actors, survivor_optimizers = [], [], []
@@ -580,6 +500,7 @@ class AGRPO:
             self.actors, self.old_actors, self.optimizers = nn.ModuleList(survivor_actors), nn.ModuleList(survivor_old_actors), survivor_optimizers
             self.N = len(self.actors)
 
+        elite_stats = self._update_reference_policy_mixture(returns_for_ranking)
         self.buffer = bf.PopulationBuffer(self.N) 
 
         if (ep + 1) % self.plot_interval == 0:
@@ -657,11 +578,11 @@ class AGRPO:
         checkpoint = {
             'episode': ep,
             'eval_rewards': eval_rewards,
-            'seed_logs': seed_logs if seed_logs is not None else [],
+            'seed_logs': seed_logs if seed_logs is not None else [], # NEU: Telemetrie speichern
             'current_policy_idx': self.current_policy_idx,
             'actors_state_dict': self.actors.state_dict(),
             'old_actors_state_dict': self.old_actors.state_dict(),
-            'ref_actors_state_dict': self.ref_actors.state_dict(),
+            'ref_actor_state_dict': self.ref_actor.state_dict(),
             'optimizers_state_dict': [opt.state_dict() for opt in self.optimizers],
             'buffer_data': self.buffer.buffers,
             'current_episodes': getattr(self.buffer, 'current_episodes', None),
@@ -674,25 +595,19 @@ class AGRPO:
     def load_checkpoint(self, path):
         if not os.path.exists(path):
             return {'episode': 0, 'eval_rewards': [], 'seed_logs': []}
-
+        
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
         self.actors.load_state_dict(ckpt['actors_state_dict'])
         self.old_actors.load_state_dict(ckpt['old_actors_state_dict'])
-
-        if 'ref_actors_state_dict' in ckpt:
-            self.ref_actors.load_state_dict(ckpt['ref_actors_state_dict'])
-            self.ref_actor = self.ref_actors[0]
-        elif 'ref_actor_state_dict' in ckpt:
-            self.ref_actor.load_state_dict(ckpt['ref_actor_state_dict'])
-
+        self.ref_actor.load_state_dict(ckpt['ref_actor_state_dict'])
         for opt, state in zip(self.optimizers, ckpt['optimizers_state_dict']):
             opt.load_state_dict(state)
         self.current_policy_idx = ckpt['current_policy_idx']
         self.buffer.buffers = ckpt['buffer_data']
-
+        
         if ckpt.get('current_episodes') is not None:
             self.buffer.current_episodes = ckpt['current_episodes']
-
+            
         self.trauma_centers = ckpt.get('trauma_centers', [])
         self.scaler = ckpt.get('scaler', StandardScaler())
         self.pca = ckpt.get('pca', None)

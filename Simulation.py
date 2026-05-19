@@ -1,3 +1,5 @@
+from re import A
+
 import gymnasium as gym
 import shimmy
 import torch
@@ -10,10 +12,12 @@ import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
 import Algorithms.AGRPO as AGRPO
+import Algorithms.AGRPO_memory as AGRPO_mem
 import time
 import numpy as np
 import utils as bf
 import random
+import inspect
 import logger # Replaces Plotting and time_logger
 import torch.multiprocessing as mp
 import warnings
@@ -83,20 +87,26 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         seed_logs = checkpoint_data.get('seed_logs', []) 
         print(f"Resuming from Episode {start_episode}")
 
-    print(f"\n--- Run: {algo_name} | Seed: {seed} ---")
+    print(f"\n--- Run: {algo_name} on {env_name} | Seed: {seed} ---")
 
+    early_stop = False
+        
     for ep in range(start_episode, MAX_EPISODES):
-        track_data = None
-        if env_name == "CarRacing-v3" and hasattr(env.unwrapped, 'track'):
-            track_seed = 42 + (ep // 20) 
-            state, _ = env.reset(seed=track_seed)
-            track_data = [(t[2], t[3]) for t in env.unwrapped.track]
-            agent.current_track_data = track_data
-        else:
-            state, _ = env.reset()                                  
+        
+        # track_data = None
+        # if env_name == "CarRacing-v3" and hasattr(env.unwrapped, 'track'):
+        #     track_seed = 42 + (ep // 20) 
+        #     state, _ = env.reset(seed=track_seed)
+        #     track_data = [(t[2], t[3]) for t in env.unwrapped.track]
+        #     agent.current_track_data = track_data
+        # else:
+        #     state, _ = env.reset()
+        
+        state, _ = env.reset()
         
         agent.current_episode = ep
-        update_stats = {} # Reset stats for the episode
+        update_stats = None # Set to None initially to avoid logging empty dictionaries
+        step_time = 0.0
 
         for t in range(MAX_STEPS):
             action = agent.select_action(state)
@@ -113,45 +123,72 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             episode_done = done or truncated
             stats = agent.step(state, action, reward, next_state, episode_done, pos=pos)
             
-            # If an update happened, capture the stats
+            step_time = time.time() - seed_time
+
+            # Capture stats if the population update was triggered this step
             if stats is not None:
                 update_stats = stats 
                 current_elite_score = stats.get("elite_mean", 0)
+                print(f"\rEpisode {ep} | Time: {step_time:.2f}s         ", end="", flush=True)
+
+                agent_n = getattr(agent, 'N', 0)
+                if agent_n > 0 and (MAX_EPISODES - ep - 1) < agent_n:
+                    early_stop = True
 
             state = next_state
             if episode_done:
                 break
-
-        # Evaluation
-        if algo_name == "AGRPO":
-            eval_ep_reward = current_elite_score
-        else:
-            eval_state, _ = eval_env.reset()
-            eval_ep_reward = 0
-            for t in range(MAX_STEPS):
-                eval_action = agent.select_action(eval_state, evaluate=True) 
-                eval_state, r, d, trunc, _ = eval_env.step(eval_action)
-                eval_ep_reward += r
-                if d or trunc: break
-
-        eval_rewards.append(eval_ep_reward)
-
-        if ep > 0 and ep % 100 == 0:
-            agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards, seed_logs=seed_logs)
-            print(f"Checkpoint saved at Episode {ep}")
-
-        step_time = time.time() - seed_time
-        Environment_name = env_name.split("/")[-1] 
-        if ep % 10 == 0: print(f"{Environment_name} Ep {ep}: {eval_ep_reward:.4f} Time: {step_time:.2f}s")
         
-        # NEW: Log telemetry for this episode
-        seed_logs.append({
-            "seed": seed,
-            "episode": ep,
-            "eval_reward": eval_ep_reward,
-            "step_time_s": round(step_time, 2),
-            **update_stats
-        })
+        # Check the flag to see if an update occurred at the end of this episode
+        updated = agent.consume_update_flag()
+
+        # ---------------------------------------------------------------------
+        # EVALUATION, LOGGING & CHECKPOINTING (Executes ONLY after a full generation)
+        # ---------------------------------------------------------------------
+        if updated and update_stats is not None: 
+            
+            # 1. Evaluation
+            agent.ref_actors.eval()
+            eval_ep_reward = 0
+            num_eval_episodes = 5 
+            
+            for _ in range(num_eval_episodes):
+                # FIX: Reset MUST happen inside the loop for each new evaluation run
+                # NOTE: If you want to evaluate on the exact memorized track, add seed=seed here.
+                eval_state, _ = eval_env.reset() 
+                
+                ep_reward = 0
+                for t in range(MAX_STEPS):
+                    eval_action = agent.select_action(eval_state, evaluate=True) 
+                    eval_state, r, d, trunc, _ = eval_env.step(eval_action)
+                    ep_reward += r
+                    if d or trunc: break
+                
+                eval_ep_reward += ep_reward
+                
+            true_eval_score = eval_ep_reward / num_eval_episodes 
+            eval_rewards.append(true_eval_score)
+            
+            agent.ref_actors.train()
+            print(f"\n   [Evaluation] Champion Average Score ({num_eval_episodes} runs): {true_eval_score:.2f}")
+
+            # 2. Checkpointing
+            agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards, seed_logs=seed_logs)
+            print(f"   [System] Checkpoint saved at Episode {ep}\n")
+            
+            # 3. Telemetry Logging
+            # This ensures logs are strictly tied to updates, reducing file size drastically
+            seed_logs.append({
+                "seed": seed,
+                "episode": ep,
+                "eval_reward": true_eval_score, # FIX: Log the average, not the sum
+                "step_time_s": round(step_time, 2),
+                **update_stats
+            })
+    
+        if early_stop:
+            print(f"Ending run early at episode {ep}: Not enough episodes left ({MAX_EPISODES - ep - 1}) for another full update cycle (N={getattr(agent, 'N', 0)}).")
+            break
 
     agent.save_checkpoint(final_path, ep=MAX_EPISODES-1, eval_rewards=eval_rewards, seed_logs=seed_logs) 
     env.close()
@@ -177,6 +214,7 @@ if __name__ == '__main__':
         "SAC": SAC.SAC,
         "CGRPO": CGRPO.CGRPO,
         "AGRPO": AGRPO.AGRPO,
+        "AGRPO_mem": AGRPO_mem.AGRPO
     }
 
     RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower() 
@@ -203,7 +241,7 @@ if __name__ == '__main__':
     else:
         agents = [AGRPO.AGRPO]
 
-    print(f"RUN_MODE={RUN_MODE} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
+    print(f"RUN_MODE={RUN_MODE} | AGENTS={agents} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
 
     np.random.seed(42) 
     master_seeds = np.random.randint(size=NUM_SEEDS, low=0, high=10000) 
@@ -213,23 +251,42 @@ if __name__ == '__main__':
             start_time = time.time()
             algo_name = AgentClass.__name__
             
-            # --- NEW: Experiment Logger Initialization ---
             exp_logger = logger.ExperimentLogger(env_name, algo_name)
             
-            # Create a readable Config
-            config = {
-                "Algorithm": algo_name,
-                "Environment": env_name,
-                "RUN_MODE": RUN_MODE,
-                "MAX_EPISODES": MAX_EPISODES,
-                "MAX_STEPS": MAX_STEPS,
-                "SKIP_STEPS": SKIP_STEPS,
-                "NUM_SEEDS": NUM_SEEDS,
-                "Master_Seeds": master_seeds.tolist(),
-                "OS": platform.system(),
-                "Description": "Fixed parameter run with exhaustive component tracking."
+            # Fetch parameters dynamically from the agent, default to 0 if they don't exist
+            sig = inspect.signature(AgentClass.__init__)
+
+            def get_default(param_name, fallback=0):
+                if param_name in sig.parameters:
+                    val = sig.parameters[param_name].default
+                    if val is not inspect.Parameter.empty:
+                        return val
+                return fallback
+
+            agent_params = {
+                "N": get_default('N', 0),
+                "K": get_default('K', 0),
+                "lr": get_default('lr', 0),
+                "epsilon": get_default('epsilon', 0),
+                "lam_s": get_default('lam_s', 0),
+                "lam_d": get_default('lam_d', 0),
+                "lam_t": get_default('lam_t', 0),
+                "gamma": get_default('gamma', 0),
+                "dbscan_eps": get_default('dbscan_eps', 0),
+                "warmup_episodes": get_default('warmup_episodes', 0)
             }
-            exp_logger.save_config(config)
+            
+            config_dict = {
+                "Env": env_name,
+                "Algo": algo_name,
+                "Master_Seeds": master_seeds.tolist(),
+                "Max_Episodes": MAX_EPISODES,
+                "Max_Steps": MAX_STEPS
+            }
+            
+            # Merge and save
+            config_dict.update(agent_params)
+            exp_logger.save_config(config_dict)
             
             # Backup Source Code 
             files_to_backup = ["Simulation.py", "utils.py", f"Algorithms/{algo_name}.py"]
