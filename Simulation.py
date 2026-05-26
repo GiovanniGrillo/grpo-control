@@ -1,4 +1,5 @@
 from re import A
+from tabnanny import check
 
 import gymnasium as gym
 import shimmy
@@ -11,6 +12,7 @@ import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
+import Algorithms.EGRPO as EGRPO
 import Algorithms.AGRPO as AGRPO
 import Algorithms.AGRPO_memory as AGRPO_mem
 import time
@@ -90,9 +92,13 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     print(f"\n--- Run: {algo_name} on {env_name} | Seed: {seed} ---")
 
     early_stop = False
+
+    checkpoint_counter = 0
         
     for ep in range(start_episode, MAX_EPISODES):
         
+        checkpoint_counter += 1
+
         # track_data = None
         # if env_name == "CarRacing-v3" and hasattr(env.unwrapped, 'track'):
         #     track_seed = 42 + (ep // 20) 
@@ -148,7 +154,11 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         if updated and update_stats is not None: 
             
             # 1. Evaluation
-            agent.ref_actors.eval()
+            if hasattr(agent, 'set_eval_mode'):
+                agent.set_eval_mode()
+            elif hasattr(agent, 'ref_actors'):
+                agent.ref_actors.eval() # Fallback für deine alten GRPO Agenten
+            
             eval_ep_reward = 0
             num_eval_episodes = 5 
             
@@ -169,12 +179,18 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             true_eval_score = eval_ep_reward / num_eval_episodes 
             eval_rewards.append(true_eval_score)
             
-            agent.ref_actors.train()
+            if hasattr(agent, 'set_train_mode'):
+                agent.set_train_mode()
+            elif hasattr(agent, 'ref_actors'):
+                agent.ref_actors.train()
+                
             print(f"\n   [Evaluation] Champion Average Score ({num_eval_episodes} runs): {true_eval_score:.2f}")
-
+            
             # 2. Checkpointing
-            agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards, seed_logs=seed_logs)
-            print(f"   [System] Checkpoint saved at Episode {ep}\n")
+            if checkpoint_counter >= 100:
+                checkpoint_counter = 0
+                agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards, seed_logs=seed_logs)
+                print(f"   [System] Checkpoint saved at Episode {ep}\n")
             
             # 3. Telemetry Logging
             # This ensures logs are strictly tied to updates, reducing file size drastically
@@ -213,6 +229,7 @@ if __name__ == '__main__':
         "PPO": PPO.PPO,
         "SAC": SAC.SAC,
         "CGRPO": CGRPO.CGRPO,
+        "EGRPO": EGRPO.EGRPO,
         "AGRPO": AGRPO.AGRPO,
         "AGRPO_mem": AGRPO_mem.AGRPO
     }
@@ -239,7 +256,7 @@ if __name__ == '__main__':
         requested = [name.strip() for name in agent_override.split(",") if name.strip()]
         agents = [AGENT_REGISTRY[name] for name in requested]
     else:
-        agents = [AGRPO.AGRPO]
+        agents = [EGRPO.AGRPO]
 
     print(f"RUN_MODE={RUN_MODE} | AGENTS={agents} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
 

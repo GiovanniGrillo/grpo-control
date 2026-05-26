@@ -40,10 +40,25 @@ def generate_plots_for_run(run_dir):
         return
 
     print(f"Generating plots for: {os.path.basename(run_dir)} ...")
-    
+
     grouped = df.groupby('episode')
-    df_mean = grouped.mean()
-    df_std = grouped.std()
+
+    # Parse group_baselines if present (it's a string representation of a list)
+    if 'group_baselines' in df.columns:
+        def parse_baselines(x):
+            """Convert string representation of numpy array to mean value."""
+            try:
+                # Handle string representation like "[np.float64(2.31), np.float64(4.11)]"
+                x_str = str(x).replace('np.float64(', '').replace(')', '')
+                values = [float(v.strip()) for v in x_str.strip('[]').split(',')]
+                return np.mean(values)
+            except:
+                return np.nan
+
+        df['group_baselines'] = df['group_baselines'].apply(parse_baselines)
+
+    df_mean = grouped.mean(numeric_only=True)
+    df_std = grouped.std(numeric_only=True)
     
     df_mean.replace([np.inf, -np.inf], np.nan, inplace=True)
     

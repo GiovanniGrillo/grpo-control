@@ -170,9 +170,7 @@ class CGRPO:
         # PRE-COMPUTATION & CHAMPION SELECTION
         # ---------------------------------------------------------
         policy_returns = [[] for _ in range(self.num_policies)]
-        
-        # NEU: all_logprobs hinzugefügt
-        all_obs, all_actions, all_logprobs, all_features, all_rtg, all_policy_ids = [], [], [], [], [], []
+        all_obs, all_actions, all_features, all_rtg, all_policy_ids = [], [], [], [], []
 
         for ep_data in self.buffer.episodes:
             rewards = ep_data["reward"]
@@ -183,24 +181,23 @@ class CGRPO:
             
             all_obs.append(torch.stack(ep_data["obs"]))
             all_actions.append(torch.stack(ep_data["action"]))
-            all_logprobs.append(torch.stack(ep_data["logprob"])) # <-- Cacht die originalen Wahrscheinlichkeiten
             all_features.append(torch.stack(ep_data["feature"]))
             all_rtg.append(rtg)
             all_policy_ids.append(torch.full((len(rewards),), p_idx, dtype=torch.long))
 
-        # Champion ermitteln
+        # Identify champion policy (to update reference policy at the end)
         avg_returns = [np.mean(ret) if len(ret) > 0 else -np.inf for ret in policy_returns]
         self.champion_idx = int(np.argmax(avg_returns))
 
         flat_obs = torch.cat(all_obs).to(self.device)
         flat_actions = torch.cat(all_actions).to(self.device)
-        flat_logprobs = torch.cat(all_logprobs).to(self.device)  # <-- Tensor für die Ratios
         flat_rtg = torch.cat(all_rtg).to(self.device)
         flat_policy_ids = torch.cat(all_policy_ids).to(self.device)
         flat_features_np = torch.cat(all_features).numpy()
 
         # ---------------------------------------------------------
         # Eq 6: STATE-AWARE ADVANTAGE ESTIMATION
+        # A_i(s_t, a_t) = G_i(s_t) - mean(G_cluster(s_t))
         # ---------------------------------------------------------
         labels = self._cluster_states(flat_features_np)
         labels_t = torch.tensor(labels, device=self.device)
@@ -210,26 +207,30 @@ class CGRPO:
         
         for c in unique_labels:
             c_val = c.item()
-            if c_val == -1: continue 
+            if c_val == -1: continue # Ignore noise
             
             mask = (labels_t == c_val)
             c_rtg = flat_rtg[mask]
             
+            # Subtract baseline (mean of state cluster)
             if len(c_rtg) > 1:
                 advantages[mask] = c_rtg - c_rtg.mean()
 
         # ---------------------------------------------------------
         # Eq 8: GROUP-NORMALIZED ADVANTAGES
         # ---------------------------------------------------------
+        # Note: Since N=2 effectively forms one global policy group for 
+        # this experiment, we normalize across the entire collected batch.
         adv_mean = advantages.mean()
         adv_std = advantages.std() + 1e-8
         advantages = (advantages - adv_mean) / adv_std
         advantages = torch.clamp(advantages, -4.0, 4.0)
 
+        # Eq 9: Group-specific clipping (simplifies to base since group is global)
         epsilon_g = self.epsilon_base * max(1.0, float(adv_std) / float(adv_std)) 
 
         # ---------------------------------------------------------
-        # Eq 12: POLICY UPDATES
+        # Eq 12: POLICY UPDATES (L_CGRPO + L_smooth + L_diversity)
         # ---------------------------------------------------------
         batch_size = 256
         avg_loss, avg_l_smooth, avg_l_div = 0.0, 0.0, 0.0
@@ -237,12 +238,12 @@ class CGRPO:
 
         for epoch in range(self.K_epochs):
             for p_idx in range(self.num_policies):
+                # Strict On-Policy isolation: Policy only learns from its own data
                 p_mask = (flat_policy_ids == p_idx)
                 if not p_mask.any(): continue
                 
                 p_obs = flat_obs[p_mask]
                 p_actions = flat_actions[p_mask]
-                p_old_logprobs = flat_logprobs[p_mask] # <-- Isoliert die originalen Log-Probs
                 p_adv = advantages[p_mask]
                 
                 indices = torch.randperm(len(p_obs))
@@ -252,45 +253,46 @@ class CGRPO:
                     
                     b_obs = p_obs[batch_idx]
                     b_actions = p_actions[batch_idx]
-                    b_old_logprobs = p_old_logprobs[batch_idx] # <-- Batch
                     b_adv = p_adv[batch_idx]
                     
                     feat = self.policies[p_idx].forward_features(b_obs)
                     dist = self.policies[p_idx].get_distribution(feat)
                     
+                    # Unbound action for normal distribution evaluation
                     u = torch.atanh(torch.clamp(b_actions, -0.999999, 0.999999))
                     new_log_probs = dist.log_prob(u) - torch.log(1.0 - b_actions.pow(2) + 1e-6)
                     new_log_probs = new_log_probs.sum(dim=-1)
                     
-                    # ---------------------------------------------------------
-                    # PPO RATIO (Mit dem sicheren, gecachten Werten & zusätzlichem Clamp!)
-                    # ---------------------------------------------------------
-                    log_ratio = new_log_probs - b_old_logprobs
-                    log_ratio_clamped = torch.clamp(log_ratio, min=-20.0, max=5.0) # Schutznetz
-                    ratio = torch.exp(log_ratio_clamped)
+                    # Log-probs of old actions for the ratio
+                    with torch.no_grad():
+                        old_dist = self.policy_ref.get_distribution(self.policy_ref.forward_features(b_obs))
+                        old_log_probs = old_dist.log_prob(u) - torch.log(1.0 - b_actions.pow(2) + 1e-6)
+                        old_log_probs = old_log_probs.sum(dim=-1)
+
+                    ratio = torch.exp(new_log_probs - old_log_probs)
                     
-                    # Objective 1: Clipped CGRPO Objective
+                    # Objective 1: Clipped CGRPO Objective (Eq 8)
                     surr1 = ratio * b_adv
                     surr2 = torch.clamp(ratio, 1.0 - epsilon_g, 1.0 + epsilon_g) * b_adv
                     L_CGRPO = -torch.min(surr1, surr2).mean()
 
-                    # Objective 2: Temporal Smoothness
+                    # Objective 2: Temporal Smoothness (Eq 10)
+                    # Penalizes erratic jumps in feature space between sequential states
                     if len(feat) > 1:
                         L_smooth = self.lam_s * torch.mean((feat[1:] - feat[:-1])**2)
                     else:
                         L_smooth = torch.tensor(0.0).to(self.device)
 
-                    # ---------------------------------------------------------
-                    # Objective 3: Inter-Group Diversity (HIER wird policy_ref benötigt)
-                    # ---------------------------------------------------------
+                    # Objective 3: Inter-Group Diversity (Eq 11)
+                    # Penalizes policies if their mean actions become too similar to the reference
                     mean_action = dist.mean
                     with torch.no_grad():
-                        old_dist = self.policy_ref.get_distribution(self.policy_ref.forward_features(b_obs))
                         ref_mean_action = old_dist.mean
                         
                     sim = torch.nn.functional.cosine_similarity(mean_action, ref_mean_action, dim=-1)
                     L_diversity = self.lam_d * torch.mean(torch.clamp(sim - self.tau_div, min=0.0))
 
+                    # Total Loss (Eq 12)
                     total_loss = L_CGRPO + L_smooth + L_diversity
 
                     if torch.isnan(total_loss) or torch.isinf(total_loss):
@@ -298,7 +300,6 @@ class CGRPO:
 
                     self.optimizers[p_idx].zero_grad()
                     total_loss.backward()
-                    # Verhindert, dass Reste-Spikes das Netzwerk sprengen
                     torch.nn.utils.clip_grad_norm_(self.policies[p_idx].parameters(), 0.5)
                     self.optimizers[p_idx].step()
                     
@@ -311,7 +312,9 @@ class CGRPO:
         
         # ---------------------------------------------------------
         # Eq 29-30: REFERENCE POLICY UPDATE
+        # Update \pi_{ref} as mixture of top-performing policies
         # ---------------------------------------------------------
+        # We perform hard-distillation by copying the champion's weights
         self.policy_ref.load_state_dict(self.policies[self.champion_idx].state_dict())
 
         # Exploration Decay
@@ -331,7 +334,7 @@ class CGRPO:
             "tier_elite_action_std": self.action_std,
             "population_size": self.num_policies
         }
-    
+
     def save_checkpoint(self, path, ep, eval_rewards, seed_logs=None):
         checkpoint = {
             'episode': ep,

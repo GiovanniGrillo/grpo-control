@@ -18,9 +18,9 @@ class AGRPO:
     """
     Advanced Group Relative Policy Optimization (AGRPO).
     """
-    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=100, K=2, epsilon=0.2,
-                 tau=0.5, lam_s=0.01, lam_d=0.05, lam_t=0.0, gamma=0.99, dbscan_eps=0.4,
-                 warmup_episodes=100, initial_threshold=-1.0):
+    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=20, K=1, epsilon=0.4,
+                 tau=0.5, lam_s=0.01, lam_d=0.01, gamma=0.99, dbscan_eps=0.2,
+                 warmup_episodes=100):
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
@@ -30,7 +30,6 @@ class AGRPO:
         self.tau = tau
         self.lam_s = lam_s      
         self.lam_d = lam_d      
-        self.lam_t = lam_t      
         self.gamma = gamma
         self.dbscan_eps = dbscan_eps
         self.plot_interval = N  
@@ -44,8 +43,6 @@ class AGRPO:
         self.return_mean_history = collections.deque(maxlen=20)
         self.return_std_history = collections.deque(maxlen=20)
 
-        self.dynamic_threshold = initial_threshold
-        self.trauma_centers = []
         self.current_track_data = None
 
         self.obs_space = env.observation_space
@@ -105,14 +102,12 @@ class AGRPO:
         return None
 
     def consume_update_flag(self):
-        """Check if an update has just occurred and reset the flag."""
         if self.updated:
             self.updated = False
             return True
         return False
 
     def _update_ensemble(self, top_indices):
-        """Update reference actor ensemble with top elite policies."""
         with torch.no_grad():
             for i, idx in enumerate(top_indices):
                 if i < len(self.ref_actors):
@@ -159,7 +154,6 @@ class AGRPO:
             obs = torch.stack(traj["obs"]).to(self.device)
             actions = torch.stack(traj["action"]).to(self.device)
 
-            # Environment-agnostic shape fix (e.g., CartPole vs CarRacing)
             if actions.dim() == 1:
                 actions = actions.unsqueeze(-1)
 
@@ -167,25 +161,29 @@ class AGRPO:
                 feat = self.actors[i].forward_features(obs)
                 dist = self.actors[i].get_distribution(feat)
                 
-                obs_mean = obs.mean(dim=0).cpu().numpy().flatten()
-                obs_std = obs.std(dim=0).cpu().numpy().flatten()
+                feat_mean = feat.mean(dim=0).cpu().numpy().flatten()
+                feat_std = feat.std(dim=0).cpu().numpy().flatten()
                 
-                log_prob_i = dist.log_prob(actions).sum(dim=-1)
+                u = torch.atanh(torch.clamp(actions, -0.999999, 0.999999))
+                squash_correction = torch.log(1.0 - actions.pow(2) + 1e-6).sum(dim=-1)
+                
+                log_prob_i = dist.log_prob(u).sum(dim=-1) - squash_correction
                 
                 elite_lps = []
                 for ref_act in self.ref_actors:
                     ref_feat = ref_act.forward_features(obs)
-                    elite_lps.append(ref_act.get_distribution(ref_feat).log_prob(actions).sum(dim=-1))
+                    ref_lp = ref_act.get_distribution(ref_feat).log_prob(u).sum(dim=-1) - squash_correction
+                    elite_lps.append(ref_lp)
                 
                 stacked_lps = torch.stack(elite_lps)
                 log_prob_ref = torch.logsumexp(stacked_lps, dim=0) - np.log(len(self.ref_actors))
                 
                 kl_div = (log_prob_i - log_prob_ref).mean().item()
-                reward_sum = sum(traj["reward"])
                 
+                reward_sum = sum(traj["reward"])
                 phi_i = np.concatenate([
-                    obs_mean, 
-                    obs_std, 
+                    feat_mean, 
+                    feat_std, 
                     np.array([reward_sum / len(traj["reward"]), kl_div])
                 ])
 
@@ -195,81 +193,60 @@ class AGRPO:
             all_actions_np.append(actions.cpu().numpy())
 
         return np.array(all_phi), all_features_np, all_pos_np, all_actions_np
-
+    
     def _cluster_states(self, all_features_np, all_pos_np, all_actions_np):
         flat_features = np.concatenate(all_features_np, axis=0)
         flat_actions = np.concatenate(all_actions_np, axis=0)
-        flat_pos = np.concatenate(all_pos_np, axis=0) # Kept purely for plotting
         
-        subsample_idx = np.arange(0, len(flat_features), 10) 
-        features_subsampled = flat_features[subsample_idx]
-        actions_subsampled = flat_actions[subsample_idx]
-        
-        # 1. PCA for Latent Features
-        scaled_features_sub = self.scaler.fit_transform(features_subsampled)
-        pca_dims = 20
+        # UPGRADE: Statt dem kurzsichtigen 1-Step Reward berechnen wir den 
+        # diskontierten zukünftigen Gesamtertrag (Return-to-Go) pro State/Action!
+        all_rtg = []
+        for i in range(len(all_features_np)):
+            rewards = self.buffer.get_latest_trajectory(i)["reward"]
+            # bf.compute_returns_to_go gibt einen PyTorch-Tensor zurück, wir machen Numpy draus
+            rtg = bf.compute_returns_to_go(rewards, self.gamma, self.device).cpu().numpy()
+            all_rtg.append(rtg)
+            
+        flat_rtg = np.concatenate(all_rtg, axis=0)
+
+        # 1. PCA for Latent State Features
+        scaled_features = self.scaler.fit_transform(flat_features)
+        pca_dims = 30
         pca_comps = min(pca_dims, flat_features.shape[1])
         if self.pca is None or self.pca.n_components != pca_comps:
             self.pca = PCA(n_components=pca_comps)
+        pca_features = np.nan_to_num(self.pca.fit_transform(scaled_features), nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 2. Scale Actions
+        scaled_actions = np.nan_to_num(self.action_scaler.fit_transform(flat_actions), nan=0.0, posinf=0.0, neginf=0.0)
         
-        pca_features_sub = self.pca.fit_transform(scaled_features_sub)
-        pca_features_sub = np.nan_to_num(pca_features_sub, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float64)
+        # 3. Scale RTG (Standardize to match state/action scale)
+        scaled_returns = self.scaler.fit_transform(flat_rtg.reshape(-1, 1))
 
-        # 2. Scaling uncompromised action dimensions
-        scaled_actions_sub = np.nan_to_num(self.action_scaler.fit_transform(actions_subsampled), nan=0.0, posinf=0.0, neginf=0.0)
-
-        # 3. Environment-agnostic action weighting
-        action_dim = actions_subsampled.shape[1]
-        base_action_weight = 2.0 
-        dynamic_action_weight = base_action_weight / np.sqrt(action_dim) 
-
-        # 4. Feature Injection for HDBSCAN
-        combined_sub = np.concatenate([
-            pca_features_sub, 
-            scaled_actions_sub * dynamic_action_weight
+        # 4. Feature Injection: State + Action + FUTURE RETURN
+        combined = np.concatenate([
+            pca_features, 
+            scaled_actions * 2.0,  
+            scaled_returns * 2.0   # Gewichtung des langfristigen Erfolgs!
         ], axis=1)
 
-        c_size = int(max(10, len(combined_sub) * 0.005))
+        # 5. HDBSCAN Clustering
+        c_size = int(np.clip(len(combined) * 0.005, 10, 200))
         min_samples = int(max(5, c_size / 2))
+        
         dbscan = HDBSCAN(min_cluster_size=c_size, min_samples=min_samples, 
                          cluster_selection_epsilon=self.dbscan_eps, core_dist_n_jobs=1)
-        hdbscan_labels = dbscan.fit_predict(combined_sub)
-
-        # --- KNN assignment for remaining data ---
-        valid_mask = hdbscan_labels != -1
-        valid_features = combined_sub[valid_mask]
-        valid_labels = hdbscan_labels[valid_mask]
-
-        full_scaled_feat = self.scaler.transform(flat_features)
-        full_pca = np.nan_to_num(self.pca.transform(full_scaled_feat), nan=0.0, posinf=0.0, neginf=0.0)
-        full_scaled_actions = np.nan_to_num(self.action_scaler.transform(flat_actions), nan=0.0, posinf=0.0, neginf=0.0)
         
-        full_combined = np.concatenate([
-            full_pca, 
-            full_scaled_actions * dynamic_action_weight
-        ], axis=1)
-
-        if len(valid_labels) == 0:
-            labels = np.zeros(len(flat_features), dtype=int)
-        else:
-            knn = KNeighborsClassifier(n_neighbors=5)
-            knn.fit(valid_features, valid_labels)
-            labels = knn.predict(full_combined)
-        
+        labels = dbscan.fit_predict(combined)
         traj_lengths = [len(f) for f in all_features_np]
         
         # LOGGING
         self.last_num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         self.last_noise_ratio = (labels == -1).sum() / len(labels) if len(labels) > 0 else 0.0
 
-        ep = getattr(self, 'current_episode', 0)
-        if (ep + 1) % self.plot_interval == 0:
-            self._plot_clusters(full_pca, labels)
-            self._plot_spatial_only(flat_pos, labels)
-
         return labels, traj_lengths
-
-    def _compute_advantages(self, labels, traj_lengths, all_features_np, all_pos_np, dynamic_threshold, reward_scale, returns):
+    
+    def _compute_advantages(self, labels, traj_lengths, returns):
         all_returns_to_go = []
         for i in range(len(self.actors)):
             rewards = self.buffer.get_latest_trajectory(i)["reward"]
@@ -281,112 +258,28 @@ class AGRPO:
 
         max_label = int(labels.max())
         means_vec = torch.zeros(max_label + 2, device=self.device)
-        means_vec[0] = flat_returns.mean()
+        means_vec[0] = flat_returns.mean() 
         for c in torch.unique(labels_t):
             c_val = int(c.item())
-            m = flat_returns[labels_t == c_val].mean()
-            means_vec[c_val + 1] = m
+            if c_val != -1:
+                m = flat_returns[labels_t == c_val].mean()
+                means_vec[c_val + 1] = m
 
         flat_baselines = means_vec[labels_t + 1]
         flat_advantages = flat_returns - flat_baselines
         advantages = list(torch.split(flat_advantages, traj_lengths))
-
-        dim = self.actors[0].extractor.feature_dim
-        max_weight = 100.0 * reward_scale 
-        self.dynamic_threshold = dynamic_threshold
-        
-        # LOGGING: Track trauma actions
-        self.trauma_new_count = 0
-        self.trauma_reinforced_count = 0
-
-        for i in range(len(self.actors)):
-            traj_return = returns[i]
-            if traj_return < self.dynamic_threshold:
-                rewards = np.array(self.buffer.get_latest_trajectory(i)["reward"])
-                positive_indices = np.where(rewards > 0)[0]
-
-                if len(positive_indices) > 0:
-                    last_good_step = positive_indices[-1]
-                    start_idx = max(0, last_good_step - 5)
-                    end_idx = min(len(rewards), last_good_step + 15)
-                else:
-                    start_idx = 0
-                    end_idx = min(len(rewards), 20)
-
-                trauma_points = all_features_np[i][start_idx:end_idx]
-                trauma_pos = all_pos_np[i][start_idx:end_idx]
-
-                if len(trauma_points) > 2:
-                    mu_feat = torch.tensor(trauma_points.mean(axis=0), dtype=torch.float32).to(self.device)
-                    sigma_feat = torch.tensor(trauma_points.std(axis=0), dtype=torch.float32).to(self.device).clamp(min=0.1)
-                    severity = abs(traj_return - self.dynamic_threshold)
-                    mu_pos = trauma_pos.mean(axis=0)
-                    sigma_pos_x = max(float(trauma_pos[:, 0].std()), 0.1)
-                    sigma_pos_y = max(float(trauma_pos[:, 1].std()), 0.1)
-
-                    new_trauma_data = {
-                        'mu': mu_feat, 'sigma': sigma_feat, 'mu_pos': mu_pos,          
-                        'sigma_pos_x': sigma_pos_x, 'sigma_pos_y': sigma_pos_y,   
-                        'weight': min(severity, max_weight)
-                    }
-
-                    merged = False
-                    if self.trauma_centers:
-                        trauma_mus = torch.stack([t['mu'] for t in self.trauma_centers])
-                        trauma_sigmas = torch.stack([t['sigma'] for t in self.trauma_centers])
-                        
-                        dist_sq = torch.sum(((mu_feat.unsqueeze(0) - trauma_mus) / trauma_sigmas) ** 2, dim=-1) / dim
-                        min_idx = torch.argmin(dist_sq).item()
-
-                        if dist_sq[min_idx] < 1.0: 
-                            existing = self.trauma_centers[min_idx]
-                            existing['weight'] += min(existing['weight'] + severity, max_weight)
-                            existing['mu'] = (existing['mu'] + mu_feat) / 2
-                            existing['mu_pos'] = (existing['mu_pos'] + mu_pos) / 2
-                            existing['sigma'] = (existing['sigma'] + sigma_feat) / 2
-                            existing['sigma_pos_x'] = (existing['sigma_pos_x'] + sigma_pos_x) / 2
-                            existing['sigma_pos_y'] = (existing['sigma_pos_y'] + sigma_pos_y) / 2
-                            merged = True
-
-                    if not merged:
-                        self.trauma_centers.append(new_trauma_data)
-                        self.trauma_new_count += 1
-                    else:
-                        self.trauma_reinforced_count += 1
-
-                    action_str = "🔄 reinforced" if merged else "⚠️ Newly created"
-                    # print(f"   [Trauma] Agent {i} | Return: {traj_return:.1f} (Limit: {self.dynamic_threshold:.1f}) | Severity: {severity:.1f} -> {action_str}")
-
-                    if len(self.trauma_centers) > 200:
-                        self.trauma_centers.pop(0)
-
         return advantages
     
-    def _compute_trauma_penalty(self, feat):
-        if not self.trauma_centers:
-            return torch.tensor(0.0).to(self.device)
-
-        total_penalty = torch.tensor(0.0).to(self.device)
-        bandwidth = 20.0 
-        dim = self.actors[0].extractor.feature_dim
-
-        for center in self.trauma_centers:
-            mu, sigma, weight = center['mu'], center['sigma'], center['weight']
-            dist_sq = torch.sum(((feat - mu) / sigma) ** 2, dim=-1)
-            normalized_dist = dist_sq / dim
-            gauss_penalty = torch.exp(-normalized_dist / (2 * (bandwidth ** 2)))
-            total_penalty += (gauss_penalty * weight).mean()
-
-        return total_penalty
-    
-    def _compute_exp_diversity(self, i, all_mus, current_lam_d):
+    def _compute_exp_diversity(self, i, current_mu, all_mus, current_lam_d):
         if current_lam_d <= 0:
             return torch.tensor(0.0).to(self.device)
         exp_scale = 5.0
         min_len = min(mu.shape[0] for mu in all_mus.values())
         if min_len == 0:
             return torch.tensor(0.0).to(self.device)
-        mu_i_trunc = all_mus[i][:min_len]
+        
+        # Use the un-detached current_mu to allow gradient flow for the active agent
+        mu_i_trunc = current_mu[:min_len]
         other_indices = [j for j in range(len(self.actors)) if j != i]
         if not other_indices:
             return torch.tensor(0.0).to(self.device)
@@ -419,31 +312,14 @@ class AGRPO:
         plt.savefig('plots/exploration_health.png')
         plt.close()
 
-    def _compute_trauma_loss(self, feat, role_lam_t, reward_scale):
-        """Compute trauma loss with easy on/off control via lam_t parameter.
-
-        Set lam_t=0.0 in __init__ to disable trauma completely.
-        Use role_lam_t for per-agent role-based scaling (elite=0, scout=high, mid=normal).
-        """
-        if role_lam_t <= 0:
-            return torch.tensor(0.0).to(self.device)
-        return role_lam_t * self._compute_trauma_penalty(feat) / reward_scale
-
     def _set_action_std_for_role(self, actor, role, ep, min_std_mids):
-        """Set fixed action std based on role. Not trained, only controlled by role and time.
-
-        Scouts: Fixed 0.6 (after warmup)
-        Mids: Exponentially decay from 0.6 to 0.1
-        Elites: Decay 5× faster than mids (std_mids / 5)
-        """
         actor.log_std.requires_grad = False
-
         if ep < self.warmup_episodes:
             target_std = 0.6
         elif role == "scout":
             target_std = 0.6
         elif role == "elite":
-            target_std = min_std_mids / 5.0
+            target_std = min_std_mids / 3.0
         else:
             target_std = min_std_mids
 
@@ -474,7 +350,6 @@ class AGRPO:
 
         all_rtg_lists = []
         returns_for_ranking = [sum(self.buffer.get_latest_trajectory(idx)["reward"]) for idx in range(self.N)]
-
         elite_stats = self._update_reference_policy_mixture(returns_for_ranking)
 
         sorted_indices = np.argsort(returns_for_ranking)
@@ -501,7 +376,6 @@ class AGRPO:
                     self._set_action_std_for_role(self.actors[i], "mid", ep, mid_std)
 
                 sum_actual_std += torch.exp(self.actors[i].log_std).mean().item()
-
                 traj_rewards = self.buffer.get_latest_trajectory(i)["reward"]
                 all_rtg_lists.append(bf.compute_returns_to_go(traj_rewards, self.gamma, self.device))
 
@@ -519,31 +393,18 @@ class AGRPO:
         self.return_mean_history.append(np.mean(current_returns))
         self.return_std_history.append(np.std(current_returns))
 
-        if ep < self.warmup_episodes:
-            dynamic_threshold = -float('inf') 
-        else:
-            roll_mean = np.mean(self.return_mean_history)
-            roll_std = np.mean(self.return_std_history)
-            dynamic_threshold = roll_mean - (1.0 * roll_std)
-
         current_std = np.std(current_returns)
         if current_std > 1e-4:
             self.running_reward_std = 0.9 * self.running_reward_std + 0.1 * current_std
-        reward_scale = self.running_reward_std 
-
-        for center in self.trauma_centers:
-            center['weight'] *= 0.99
-        forget_limit = reward_scale / 10.0
-        self.trauma_centers = [c for c in self.trauma_centers if c['weight'] > forget_limit]
+        reward_scale = self.running_reward_std
 
         ################################################################################
         # 4. ADVANTAGE NORMALIZATION & PRE-COMPUTATION
         ################################################################################
-        advantages = self._compute_advantages(labels, traj_lengths, features_np, all_pos_np,
-                                              dynamic_threshold, reward_scale, returns_for_ranking)
+        advantages = self._compute_advantages(labels, traj_lengths, returns_for_ranking)
 
         phi_norm = (phi - phi.mean(axis=0)) / (phi.std(axis=0) + 1e-8)
-        current_K = max(2, int(self.N / 15))
+        current_K = max(1, int(self.N / 15))
         groups = KMeans(n_clusters=min(current_K, len(self.actors)), n_init='auto').fit_predict(phi_norm)
         normalized_advantages = bf.normalize_advantages_by_group(advantages, groups, self.device)
         sigma_global = torch.cat(normalized_advantages).std() + 1e-8
@@ -554,14 +415,6 @@ class AGRPO:
             g_adv = torch.cat([advantages[j] for j in group_members[g]])
             group_epsilons[g] = self.epsilon * torch.clamp(g_adv.std() / sigma_global, min=1.0)
 
-        # actor_features, all_mus = {}, {}
-        # for j in range(len(self.actors)):
-        #     obs = torch.stack(self.buffer.get_latest_trajectory(j)["obs"]).to(self.device)
-        #     feat = self.actors[j].forward_features(obs)
-        #     actor_features[j], all_mus[j] = feat, self.actors[j].get_distribution(feat).mean.detach()
-
-        # with torch.no_grad():
-        #     cached_trajectories = {}
         all_mus = {}
         with torch.no_grad(): 
             for j in range(len(self.actors)):
@@ -583,7 +436,7 @@ class AGRPO:
         ################################################################################
         # 5. PPO REPLAY: MULTIPLE OPTIMIZATION EPOCHS (BATCHED FOR GPU EFFICIENCY)
         ################################################################################
-        loss_stats = {"actor_loss": 0.0, "smooth_loss": 0.0, "div_loss": 0.0, "trauma_loss": 0.0}
+        loss_stats = {"actor_loss": 0.0, "smooth_loss": 0.0, "div_loss": 0.0, "ppo_ratio": 0.0, "grad_norm": 0.0}
         updated_agents_count = 0
         PPO_EPOCHS = 10
         BATCH_SIZE = 10
@@ -593,7 +446,6 @@ class AGRPO:
             batch_end = min(batch_start + BATCH_SIZE, len(self.actors))
             batch_indices = list(range(batch_start, batch_end))
 
-            # Load entire batch to GPU once
             batch_cached = {}
             for i in batch_indices:
                 batch_cached[i] = {
@@ -603,7 +455,6 @@ class AGRPO:
                     'adv': cached_trajectories[i]['adv'].to(self.device)
                 }
 
-            # Run all epochs on this batch
             for epoch in range(PPO_EPOCHS):
                 epoch_violators = []
                 for i in batch_indices:
@@ -611,11 +462,11 @@ class AGRPO:
                     if epoch == 0: updated_agents_count += 1
 
                     if i in elite_idx:
-                        role_lam_d, role_lam_t = 0.0, 0.0
+                        role_lam_d = 0.0
                     elif i in scout_idx:
-                        role_lam_d, role_lam_t = current_lam_d * 30.0, self.lam_t
+                        role_lam_d = current_lam_d * 30.0
                     else:
-                        role_lam_d, role_lam_t = current_lam_d, self.lam_t
+                        role_lam_d = current_lam_d
 
                     cached = batch_cached[i]
                     obs = cached['obs']
@@ -625,34 +476,43 @@ class AGRPO:
 
                     feat = self.actors[i].forward_features(obs)
                     dist = self.actors[i].get_distribution(feat)
-                    new_log_probs = dist.log_prob(actions).sum(dim=-1)
+                    
+                    u = torch.atanh(torch.clamp(actions, -0.999999, 0.999999))
+                    squash_correction = torch.log(1.0 - actions.pow(2) + 1e-6).sum(dim=-1)
+                    new_log_probs = dist.log_prob(u).sum(dim=-1) - squash_correction
 
                     ratio = torch.exp(new_log_probs - old_log_probs)
+                    loss_stats["ppo_ratio"] += ratio.mean().item() / PPO_EPOCHS
+
                     epsilon_i = group_epsilons[groups[i]]
                     surr1 = ratio * adv
                     surr2 = torch.clamp(ratio, 1 - epsilon_i, 1 + epsilon_i) * adv
                     actor_loss = -torch.min(surr1, surr2).mean()
 
                     l_smooth = torch.mean((feat[1:] - feat[:-1]) ** 2) if feat.shape[0] > 1 else torch.tensor(0.0).to(self.device)
-                    l_div = self._compute_exp_diversity(i, all_mus, role_lam_d) / reward_scale
+                    l_div = self._compute_exp_diversity(i, dist.mean, all_mus, role_lam_d) / reward_scale
 
-                    # Track agents violating the diversity tau limit
                     if l_div.item() > 1e-4:
                         epoch_violators.append(i)
 
-                    l_trauma = self._compute_trauma_loss(feat, role_lam_t, reward_scale)
-
-                    total_loss = actor_loss + (self.lam_s * l_smooth) + l_div + l_trauma
+                    total_loss = actor_loss + (self.lam_s * l_smooth) + l_div
 
                     self.optimizers[i].zero_grad()
-                    total_loss.backward()
+                    total_loss.backward(retain_graph=False)
+                    
+                    grad_norm = 0.0
+                    for p in self.actors[i].parameters():
+                        if p.grad is not None:
+                            grad_norm += p.grad.data.norm(2).item() ** 2
+                    grad_norm = grad_norm ** 0.5
+                    loss_stats["grad_norm"] += grad_norm / PPO_EPOCHS
+
                     torch.nn.utils.clip_grad_norm_(self.actors[i].parameters(), 0.5)
                     self.optimizers[i].step()
 
                     loss_stats["actor_loss"] += actor_loss.item() / PPO_EPOCHS
                     loss_stats["smooth_loss"] += (l_smooth.item() if torch.is_tensor(l_smooth) else l_smooth) / PPO_EPOCHS
                     loss_stats["div_loss"] += (l_div.item() if torch.is_tensor(l_div) else l_div) / PPO_EPOCHS
-                    loss_stats["trauma_loss"] += (l_trauma.item() if torch.is_tensor(l_trauma) else l_trauma) / PPO_EPOCHS
 
                 if epoch == 0:
                     div_violators_indices.extend(epoch_violators)
@@ -660,8 +520,6 @@ class AGRPO:
             torch.cuda.empty_cache()
 
         div_violators_count = len(div_violators_indices)
-
-        # LOGGING: Extract Action STDs per Tier BEFORE population reconstruction
         actual_stds = [torch.exp(self.actors[idx].log_std).mean().item() for idx in range(self.N)]
 
         def safe_mean(idx_list): return np.mean(current_returns[idx_list]) if len(idx_list) > 0 else 0.0
@@ -671,12 +529,10 @@ class AGRPO:
         ################################################################################
         # 6. DYNAMIC POPULATION CULLING & LOGGING
         ################################################################################
-        # pre_cull_stds = [torch.exp(actor.log_std).mean().item() for actor in self.actors] 
         reduce_population = False
         if len(mid_idx) > 0:
             mid_tier_violators = len([i for i in div_violators_indices if i in mid_idx])
             div_pressure = mid_tier_violators / len(mid_idx) if len(mid_idx) > 0 else 0.0
-            # Trigger annihilation if more than 25% of mid-tiers are penalized and population > 20
             if div_pressure > 0.25 and self.N > 20:
                 reduce_population = True
         
@@ -688,14 +544,12 @@ class AGRPO:
                     survivor_old_actors.append(self.old_actors[idx])
                     survivor_optimizers.append(self.optimizers[idx])
 
-            # Calculate how many agents to clone to replace reset_idx
             num_to_replace = len(reset_idx)
             
             if reduce_population:
-                num_to_replace = int(len(reset_idx) * 0.90)  # Clone only 90% of lower mids
+                num_to_replace = int(len(reset_idx) * 0.90)  
                 print(f"[Annihilation] Diversity pressure high. Population shrinking to {len(survivor_actors) + num_to_replace}.")
 
-            # Clone num_to_replace agents from elites
             for _ in range(num_to_replace):
                 target_elite = np.random.choice(elite_idx)
                 new_actor = bf.ContinuousActor(self.obs_space, self.action_space, self.hidden_dim).to(self.device)
@@ -721,23 +575,16 @@ class AGRPO:
             self._plot_exploration_health()
 
         for key in loss_stats: loss_stats[key] /= max(1, updated_agents_count)
-        print(f"[Update] Actor: {loss_stats['actor_loss']:.4f}, Smooth: {loss_stats['smooth_loss']:.4f}, Div: {loss_stats['div_loss']:.4f}, Trauma: {loss_stats['trauma_loss']:.4f}, Elite Return: {np.mean(elite_stats):.2f}")
+        noise_pct = getattr(self, 'last_noise_ratio', 0.0) * 100
+        cluster_cnt = getattr(self, 'last_num_clusters', 0)
+        
+        print(f"[Update] Actor: {loss_stats['actor_loss']:.4f}, Ratio: {loss_stats['ppo_ratio']:.3f}, Grad: {loss_stats['grad_norm']:.4f}, Smooth: {loss_stats['smooth_loss']:.4f}, Elite Return: {np.mean(elite_stats):.2f} | Clusters: {cluster_cnt} (Noise: {noise_pct:.1f}%)")
 
-        # def safe_mean(idx_list): return np.mean(current_returns[idx_list]) if len(idx_list) > 0 else 0.0
-        # def safe_std(idx_list): return np.std(current_returns[idx_list]) if len(idx_list) > 0 else 0.0
-        # def safe_mean_std_action(idx_list): return np.mean([pre_cull_stds[i] for i in idx_list]) if len(idx_list) > 0 else 0.0
-
-        # LOGGING: Return deep telemetry dictionary
         stats_dict = {
             "loss_actor": loss_stats["actor_loss"],
+            "ppo_ratio": loss_stats["ppo_ratio"],
             "loss_smooth": loss_stats["smooth_loss"],
             "loss_div": loss_stats["div_loss"],
-            "loss_trauma": loss_stats["trauma_loss"],
-            "trauma_threshold": getattr(self, 'dynamic_threshold', 0.0),
-            "trauma_reward_scale": reward_scale,
-            "trauma_centers_count": len(self.trauma_centers),
-            "trauma_new": getattr(self, 'trauma_new_count', 0),
-            "trauma_reinforced": getattr(self, 'trauma_reinforced_count', 0),
             "cluster_count": getattr(self, 'last_num_clusters', 0),
             "cluster_noise_ratio": getattr(self, 'last_noise_ratio', 0.0),
             "tier_elite_return_avg": safe_mean(elite_idx),
@@ -799,7 +646,6 @@ class AGRPO:
             'optimizers_state_dict': [opt.state_dict() for opt in self.optimizers],
             'buffer_data': self.buffer.buffers,
             'current_episodes': getattr(self.buffer, 'current_episodes', None),
-            'trauma_centers': self.trauma_centers,
             'scaler': self.scaler,
             'pca': self.pca
         }
@@ -827,7 +673,6 @@ class AGRPO:
         if ckpt.get('current_episodes') is not None:
             self.buffer.current_episodes = ckpt['current_episodes']
 
-        self.trauma_centers = ckpt.get('trauma_centers', [])
         self.scaler = ckpt.get('scaler', StandardScaler())
         self.pca = ckpt.get('pca', None)
         

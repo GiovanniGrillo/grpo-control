@@ -248,20 +248,29 @@ class ContinuousActor(nn.Module):
         return self.mlp(x)
 
     def get_distribution(self, features):
-        mean = torch.tanh(self.mean_head(features))
+        mean = self.mean_head(features)
         std = torch.exp(self.log_std).clamp(min=1e-3, max=1.0)
         return torch.distributions.Normal(mean, std)
 
     def sample_action(self, obs: torch.Tensor):
         feat = self.forward_features(obs)
         dist = self.get_distribution(feat)
-        action = dist.sample()
-        log_prob = dist.log_prob(action).sum(dim=-1)
+
+        u = dist.sample()
+        action = torch.tanh(u)  
+        
+        log_prob = dist.log_prob(u)
+        log_prob -= torch.log(1 - action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(dim=-1)
         return action, log_prob, feat
 
     def get_deterministic_action(self, obs: torch.Tensor) -> torch.Tensor:
         feat = self.forward_features(obs)
-        return torch.tanh(self.mean_head(feat))
+        unbounded_mean = self.mean_head(feat)
+        return torch.tanh(unbounded_mean)
+    
+    def set_action_std(self, new_std):
+        self.log_std.data.fill_(np.log(new_std))
 
 
 def compute_returns_to_go(rewards, gamma, device):
