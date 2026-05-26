@@ -237,10 +237,17 @@ class ContinuousActor(nn.Module):
             nn.Linear(self.extractor.feature_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU()
         )
 
-        self.mean_head = nn.Linear(hidden_dim, self.action_dim)
+        self.mean_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, self.action_dim)
+        )
+        
         self.log_std = nn.Parameter(torch.zeros(self.action_dim))
 
     def forward_features(self, obs):
