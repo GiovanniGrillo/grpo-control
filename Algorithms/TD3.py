@@ -1,3 +1,5 @@
+from fileinput import filename
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -20,9 +22,8 @@ class ReplayBuffer:
         self.position = 0                                          
 
     def push(self, state, action, reward, next_state, done):
-        # FIX: Store as uint8 to save 10+ GB of RAM in Colab
-        state = np.array(state * 255.0, dtype=np.uint8)
-        next_state = np.array(next_state * 255.0, dtype=np.uint8)
+        state = np.array(state, dtype=np.float32)
+        next_state = np.array(next_state, dtype=np.float32)
         
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)                               
@@ -33,9 +34,8 @@ class ReplayBuffer:
         batch = random.sample(self.buffer, batch_size)             
         state, action, reward, next_state, done = map(np.stack, zip(*batch)) 
         
-        # FIX: Convert back to float32 (0.0 to 1.0) only when sending to the GPU
-        state = state.astype(np.float32) / 255.0
-        next_state = next_state.astype(np.float32) / 255.0
+        state = state.astype(np.float32)
+        next_state = next_state.astype(np.float32)
         
         return state, action, reward, next_state, done          
 
@@ -50,6 +50,7 @@ class Actor(nn.Module):
         self.extractor = bf.FeatureExtractor(observation_space)
         self.net = nn.Sequential(
             nn.Linear(self.extractor.feature_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, act_dim),
         )
@@ -70,6 +71,7 @@ class Critic(nn.Module):
         self.q1_net = nn.Sequential(
             nn.Linear(self.extractor1.feature_dim + act_dim, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, 1)
         )
         
@@ -77,6 +79,7 @@ class Critic(nn.Module):
         self.extractor2 = bf.FeatureExtractor(observation_space)
         self.q2_net = nn.Sequential(
             nn.Linear(self.extractor2.feature_dim + act_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, hidden), nn.ReLU(),
             nn.Linear(hidden, 1)
         )
@@ -132,6 +135,15 @@ class TD3:
         self.actor_opt = optim.Adam(self.actor.parameters(), lr=lr)
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr)
 
+        self.updated = False  # Flag to indicate if an update has occurred
+
+    def consume_update_flag(self):
+        if self.updated:
+            self.updated = False
+            return True
+        return False
+
+
     def select_action(self, state, evaluate=False):
         # 1. Pure Random Warmup (Crucial for Acrobot & initial image buffers)
         if not evaluate and self.total_steps < self.start_timesteps:
@@ -149,7 +161,7 @@ class TD3:
             
         return action
 
-    def step(self, state, action, reward, next_state, done):
+    def step(self, state, action, reward, next_state, done, pos = None):
         self.memory.push(state, action, reward, next_state, done)
         self.total_steps += 1
     
@@ -157,6 +169,9 @@ class TD3:
         if len(self.memory) >= self.start_timesteps and self.total_steps % 4 == 0:
             # You can do 1 update or multiple, but spacing it out keeps simulation fast
             self.update(batch_size=256)
+            self.updated = True if self.total_steps % 20000 == 0 else False  # Set flag to indicate an update has occurred
+
+        return {}
 
             
     def update(self, batch_size):
@@ -197,3 +212,27 @@ class TD3:
                 target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
+
+    def save_checkpoint(self, path, ep, eval_rewards, seed_logs = None):
+        checkpoint = {
+            'episode': ep,
+            'eval_rewards': eval_rewards,
+            'seed_logs': seed_logs if seed_logs is not None else [],
+            'actor_state_dict': self.actor.state_dict(),
+            'critic_state_dict': self.critic.state_dict(),
+            'actor_target_state_dict': self.actor_target.state_dict(),
+            'critic_target_state_dict': self.critic_target.state_dict(),
+            'actor_optimizer_state_dict': self.actor_opt.state_dict(),
+            'critic_optimizer_state_dict': self.critic_opt.state_dict(),
+        }
+        torch.save(checkpoint, path)
+
+
+    def load_checkpoint(self, path):
+        checkpoint = torch.load(path, map_location=self.device)
+        self.actor.load_state_dict(checkpoint['actor_state_dict'])
+        self.critic.load_state_dict(checkpoint['critic_state_dict'])
+        self.actor_target.load_state_dict(checkpoint['actor_target_state_dict'])
+        self.critic_target.load_state_dict(checkpoint['critic_target_state_dict'])
+        self.actor_opt.load_state_dict(checkpoint['actor_optimizer_state_dict'])
+        self.critic_opt.load_state_dict(checkpoint['critic_optimizer_state_dict'])
