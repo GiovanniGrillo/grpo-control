@@ -18,9 +18,9 @@ class AGRPO:
     """
     Advanced Group Relative Policy Optimization (AGRPO).
     """
-    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=20, K=1, epsilon=0.4,
-                 tau=0.5, lam_s=0.01, lam_d=0.01, gamma=0.99, dbscan_eps=0.2,
-                 warmup_episodes=100):
+    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=50, K=3, epsilon=0.4,
+                 tau=0.6, lam_s=0.005, lam_d=0.01, gamma=0.99, dbscan_eps=0.2,
+                 warmup_episodes=100): #tau = 0.5
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
@@ -330,13 +330,11 @@ class AGRPO:
 
         std_start, std_warmup_end, std_final_floor = 0.8, 0.6, 0.05
         if ep < self.warmup_episodes:
-            # mid_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * (std_start - std_warmup_end))
-            mid_std = std_start
+            mid_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * (std_start - std_warmup_end))
         else:
-            decay_lambda = 0.9
+            decay_lambda = 0.069315
             time_passed = ep - self.warmup_episodes
-            # mid_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-decay_lambda * time_passed)
-            mid_std = std_start * decay_lambda ** time_passed
+            mid_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-decay_lambda * time_passed)
 
         max_warmup = 2 * self.warmup_episodes
         std_max_floor = std_final_floor + 0.45
@@ -345,8 +343,7 @@ class AGRPO:
             max_std = std_start
         else:
             time_passed_max = ep - max_warmup
-            # max_std = std_max_floor + (std_start - std_max_floor) * np.exp(-decay_lambda * time_passed_max)               # * 0,9**t
-            max_std = max(std_max_floor, std_start * decay_lambda ** time_passed_max)
+            max_std = std_max_floor + (std_start - std_max_floor) * np.exp(-decay_lambda * time_passed_max)
 
         # max_std = max(max_std, mid_std + 1e-3)
         current_lam_d = self.lam_d * (mid_std / 0.5) if ep >= self.warmup_episodes else 0.0
