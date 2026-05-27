@@ -1,5 +1,4 @@
 from re import A
-from tabnanny import check
 
 import gymnasium as gym
 import shimmy
@@ -12,8 +11,8 @@ import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.GRPO_Giovanni as GRPO_Giovanni
-import Algorithms.EGRPO as EGRPO
 import Algorithms.AGRPO as AGRPO
+#import Algorithms.AGRPO_berhan as AGRPO
 import Algorithms.AGRPO_memory as AGRPO_mem
 import time
 import numpy as np
@@ -25,6 +24,9 @@ import torch.multiprocessing as mp
 import warnings
 import platform
 
+os.environ['AGENTS'] = "PPO"
+os.environ['ENV_NAMES'] = "dm_control/cartpole-swingup-v0"
+
 os.environ["USE_NNPACK"] = "0"
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -34,6 +36,13 @@ def set_seed(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+def set_eval_mode(agent, is_eval: bool):
+    for name in ("ref_actors", "ref_actor", "actor", "policy"):
+        if hasattr(agent, name):
+            getattr(agent, name).eval() if is_eval else getattr(agent, name).train()
+            return
+
 
 def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, skip_steps, RECOVERY, checkpoint_dir):
     safe_env_name = env_name.replace("/", "_")
@@ -71,9 +80,8 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     print(f"\n--- Starting run with seed {seed_idx}/{total_seeds} ---")
 
     ckpt_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_last.pth")
-    
-    agent = AgentClass(env) 
-    
+
+    agent = AgentClass(env)
     start_episode = 0
     eval_rewards = []
     seed_logs = [] 
@@ -92,13 +100,9 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
     print(f"\n--- Run: {algo_name} on {env_name} | Seed: {seed} ---")
 
     early_stop = False
-
-    checkpoint_counter = 0
         
     for ep in range(start_episode, MAX_EPISODES):
         
-        checkpoint_counter += 1
-
         # track_data = None
         # if env_name == "CarRacing-v3" and hasattr(env.unwrapped, 'track'):
         #     track_seed = 42 + (ep // 20) 
@@ -154,11 +158,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         if updated and update_stats is not None: 
             
             # 1. Evaluation
-            if hasattr(agent, 'set_eval_mode'):
-                agent.set_eval_mode()
-            elif hasattr(agent, 'ref_actors'):
-                agent.ref_actors.eval() # Fallback für deine alten GRPO Agenten
-            
+            set_eval_mode(agent, True)
             eval_ep_reward = 0
             num_eval_episodes = 5 
             
@@ -179,18 +179,12 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             true_eval_score = eval_ep_reward / num_eval_episodes 
             eval_rewards.append(true_eval_score)
             
-            if hasattr(agent, 'set_train_mode'):
-                agent.set_train_mode()
-            elif hasattr(agent, 'ref_actors'):
-                agent.ref_actors.train()
-                
+            set_eval_mode(agent, False)
             print(f"\n   [Evaluation] Champion Average Score ({num_eval_episodes} runs): {true_eval_score:.2f}")
-            
+
             # 2. Checkpointing
-            if checkpoint_counter >= 100:
-                checkpoint_counter = 0
-                agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards, seed_logs=seed_logs)
-                print(f"   [System] Checkpoint saved at Episode {ep}\n")
+            agent.save_checkpoint(ckpt_path, ep=ep, eval_rewards=eval_rewards, seed_logs=seed_logs)
+            print(f"   [System] Checkpoint saved at Episode {ep}\n")
             
             # 3. Telemetry Logging
             # This ensures logs are strictly tied to updates, reducing file size drastically
@@ -229,16 +223,15 @@ if __name__ == '__main__':
         "PPO": PPO.PPO,
         "SAC": SAC.SAC,
         "CGRPO": CGRPO.CGRPO,
-        "EGRPO": EGRPO.EGRPO,
         "AGRPO": AGRPO.AGRPO,
         "AGRPO_mem": AGRPO_mem.AGRPO
     }
 
     RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower() 
     MAX_EPISODES = int(os.getenv("MAX_EPISODES", "500" if RUN_MODE == "full" else "60"))
-    MAX_STEPS = int(os.getenv("MAX_STEPS", "1000" if RUN_MODE == "full" else "400"))
+    MAX_STEPS = int(os.getenv("MAX_STEPS", "500" if RUN_MODE == "full" else "400"))
     SKIP_STEPS = int(os.getenv("SKIP_STEPS", "4" if RUN_MODE == "full" else "2"))
-    NUM_SEEDS = int(os.getenv("NUM_SEEDS", "5" if RUN_MODE == "full" else "2"))
+    NUM_SEEDS = int(os.getenv("NUM_SEEDS", "1" if RUN_MODE == "full" else "2"))
     RECOVERY = os.getenv("RECOVERY", "false").strip().lower() == "true"
     MULTIPROCESSING = os.getenv("MULTIPROCESSING", "false").strip().lower() == "true"
 
@@ -256,7 +249,7 @@ if __name__ == '__main__':
         requested = [name.strip() for name in agent_override.split(",") if name.strip()]
         agents = [AGENT_REGISTRY[name] for name in requested]
     else:
-        agents = [EGRPO.AGRPO]
+        agents = [AGRPO.AGRPO]
 
     print(f"RUN_MODE={RUN_MODE} | AGENTS={agents} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
 
