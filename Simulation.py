@@ -4,7 +4,7 @@ import gymnasium as gym
 import shimmy
 import torch
 import os
-import Algorithms.SAC_Robin as SAC
+import Algorithms.SAC as SAC
 import Algorithms.SAC_Giovanni as SAC_Giovanni
 import Algorithms.PPO as PPO
 import Algorithms.TD3 as TD3
