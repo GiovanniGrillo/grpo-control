@@ -25,7 +25,7 @@ class RolloutBuffer:
 
 class PPOActorNet(nn.Module):
     """Separate Actor network with a learnable log-standard deviation for PPO."""
-    def __init__(self, obs_space, action_space, hidden_dim=256):
+    def __init__(self, obs_space, action_space, hidden_dim=512):
         super(PPOActorNet, self).__init__()
         # Use the provided feature extractor
         self.extractor = bf.FeatureExtractor(obs_space)
@@ -76,7 +76,7 @@ class PPOActorNet(nn.Module):
 
 class PPOCriticNet(nn.Module):
     """Separate Critic network (Value Function) for disjoint architecture."""
-    def __init__(self, obs_space, hidden_dim=256):
+    def __init__(self, obs_space, hidden_dim=512):
         super(PPOCriticNet, self).__init__()
         # Dedicated feature extractor! (Disjoint Networks)
         self.extractor = bf.FeatureExtractor(obs_space)
@@ -93,7 +93,7 @@ class PPOCriticNet(nn.Module):
 
 class PPO:
     """Proximal Policy Optimization following the ObjectRL structure."""
-    def __init__(self, env, hidden_dim=256, lr_actor=3e-4, lr_critic=1e-3, 
+    def __init__(self, env, hidden_dim=512, lr_actor=3e-4, lr_critic=1e-3, 
                  gamma=0.99, gae_lambda=0.95, clip_rate=0.2, entropy_coef=0.01, 
                  update_timestep=4000, K_epochs=10, batch_size=256):
                  
@@ -152,16 +152,20 @@ class PPO:
         self.time_step += 1
         self.buffer.rewards.append(reward)
         self.buffer.is_terminals.append(done)
+        
+        stats = {} # Default empty stats
 
         # Trigger learning when the update timestep is reached
         if self.time_step % self.update_timestep == 0:
             with torch.no_grad():
                 next_state_t = torch.FloatTensor(next_state).to(self.device).unsqueeze(0)
                 next_value = self.critic(next_state_t)
-            self.learn(next_value)
-            self.updated = True  # Set the update flag
+            
+            # Catch the returned dictionary from learn()
+            stats = self.learn(next_value)
+            self.updated = True  
 
-        return {}
+        return stats
 
     def learn(self, next_value):
         """Learns from experience memory using PPO update rules and GAE."""
@@ -234,6 +238,21 @@ class PPO:
         # Update the old policy and clear the rollout buffer
         self.actor_old.load_state_dict(self.actor.state_dict())
         self.buffer.clear()
+
+        # Calculate current action standard deviation for logging
+        current_std = 0.0
+        if not self.actor.is_discrete:
+            with torch.no_grad():
+                # self.actor.action_logstd is the learnable parameter
+                current_std = torch.exp(self.actor.action_logstd).mean().item()
+
+        # Return the metrics matching the plotter's expected column names
+        return {
+            "loss_actor": actor_loss.item(),
+            "loss_critic": critic_loss.item(),
+            # Mapping to elite so the specific AGRPO plotter picks it up
+            "tier_elite_action_std": current_std 
+        }
 
     def save_checkpoint(self, path, ep, eval_rewards, seed_logs):
         """Saves current state for recovery."""

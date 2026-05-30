@@ -1,16 +1,19 @@
 from re import A
+from tabnanny import check
 
 import gymnasium as gym
 import shimmy
 import torch
 import os
-import Algorithms.SAC as SAC
+import Algorithms.SAC_Robin as SAC
+import Algorithms.SAC_Giovanni as SAC_Giovanni
 import Algorithms.PPO as PPO
 import Algorithms.TD3 as TD3
 import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
+import Algorithms.GRPO_Giovanni as GRPO_Giovanni
+import Algorithms.EGRPO as EGRPO
 import Algorithms.AGRPO as AGRPO
-#import Algorithms.AGRPO_berhan as AGRPO
 import Algorithms.AGRPO_memory as AGRPO_mem
 import time
 import numpy as np
@@ -32,13 +35,6 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
-def set_eval_mode(agent, is_eval: bool):
-    for name in ("ref_actors", "ref_actor", "actor", "policy"):
-        if hasattr(agent, name):
-            getattr(agent, name).eval() if is_eval else getattr(agent, name).train()
-            return
-
-
 def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name, MAX_EPISODES, MAX_STEPS, skip_steps, RECOVERY, checkpoint_dir):
     safe_env_name = env_name.replace("/", "_")
     final_path = os.path.join(checkpoint_dir, f"{safe_env_name}_{algo_name}_s{seed}_final.pth")
@@ -46,7 +42,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         print(f"Skipping Seed {seed} - already finished.")
         try:
             data = torch.load(final_path)
-            return data.get('eval_rewards', []), data.get('seed_logs', [])
+            return data.get('eval_rewards', []), []
         except:
             pass
 
@@ -90,7 +86,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         checkpoint_data = agent.load_checkpoint(ckpt_path)
         start_episode = checkpoint_data.get('episode', 0) + 1
         eval_rewards = checkpoint_data.get('eval_rewards', [])
-        current_elite_score = checkpoint_data.get('elite_score', 0.0)
+        
         seed_logs = checkpoint_data.get('seed_logs', []) 
         print(f"Resuming from Episode {start_episode}")
 
@@ -113,7 +109,7 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         # else:
         #     state, _ = env.reset()
         
-        state, _ = env.reset(seed=int(seed + ep))
+        state, _ = env.reset()
         
         agent.current_episode = ep
         update_stats = None # Set to None initially to avoid logging empty dictionaries
@@ -159,14 +155,18 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
         if updated and update_stats is not None: 
             
             # 1. Evaluation
-            set_eval_mode(agent, True)
+            if hasattr(agent, 'set_eval_mode'):
+                agent.set_eval_mode()
+            elif hasattr(agent, 'ref_actors'):
+                agent.ref_actors.eval()
+            
             eval_ep_reward = 0
             num_eval_episodes = 5 
             
             for _ in range(num_eval_episodes):
                 # FIX: Reset MUST happen inside the loop for each new evaluation run
                 # NOTE: If you want to evaluate on the exact memorized track, add seed=seed here.
-                eval_state, _ = eval_env.reset(seed=int(seed + 1000 + ep)) 
+                eval_state, _ = eval_env.reset() 
                 
                 ep_reward = 0
                 for t in range(MAX_STEPS):
@@ -180,7 +180,11 @@ def run_single_seed(seed, seed_idx, total_seeds, env_name, AgentClass, algo_name
             true_eval_score = eval_ep_reward / num_eval_episodes 
             eval_rewards.append(true_eval_score)
             
-            set_eval_mode(agent, False)
+            if hasattr(agent, 'set_train_mode'):
+                agent.set_train_mode()
+            elif hasattr(agent, 'ref_actors'):
+                agent.ref_actors.train()
+                
             print(f"\n   [Evaluation] Champion Average Score ({num_eval_episodes} runs): {true_eval_score:.2f}")
             
             # 2. Checkpointing
@@ -226,6 +230,7 @@ if __name__ == '__main__':
         "PPO": PPO.PPO,
         "SAC": SAC.SAC,
         "CGRPO": CGRPO.CGRPO,
+        "EGRPO": EGRPO.EGRPO,
         "AGRPO": AGRPO.AGRPO,
         "AGRPO_mem": AGRPO_mem.AGRPO
     }
@@ -252,7 +257,7 @@ if __name__ == '__main__':
         requested = [name.strip() for name in agent_override.split(",") if name.strip()]
         agents = [AGENT_REGISTRY[name] for name in requested]
     else:
-        agents = [AGRPO.AGRPO]
+        agents = [EGRPO.AGRPO]
 
     print(f"RUN_MODE={RUN_MODE} | AGENTS={agents} | MAX_EPISODES={MAX_EPISODES} | MAX_STEPS={MAX_STEPS} | NUM_SEEDS={NUM_SEEDS}")
 

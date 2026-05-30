@@ -43,6 +43,7 @@ class QNetwork(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(self.extractor.feature_dim + action_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
         
@@ -60,6 +61,7 @@ class PolicyNetwork(nn.Module):
         
         self.fc = nn.Sequential(
             nn.Linear(self.extractor.feature_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU()
         )
         self.mu = nn.Linear(hidden_dim, action_dim)
@@ -83,7 +85,7 @@ class PolicyNetwork(nn.Module):
 
 class SAC:
     """Soft Actor-Critic Agent."""
-    def __init__(self, env, hidden_dim=256, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2, buffer_capacity=10000):
+    def __init__(self, env, hidden_dim=512, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2, buffer_capacity=10000):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.gamma, self.tau = gamma, tau
         self.memory = ReplayBuffer(capacity=buffer_capacity)
@@ -141,13 +143,17 @@ class SAC:
         self.memory.push(state, action, reward, next_state, done)
         self.total_steps += 1
 
+        stats = None
         update_interval = 50
+  
         if len(self.memory) > 1000 and self.total_steps % update_interval == 0:
             for _ in range(update_interval):
-                self.update(self.memory, 256)
-            self.updated = True  # [PPO] Set the update flag after learning
+                stats = self.update(self.memory, 256)
+            # Trigger evaluation and logging every 2000 steps to prevent massive overhead
+            if self.total_steps % 2000 == 0:
+                self.updated = True
 
-        return {}
+        return stats
 
     def update(self, buffer, batch_size):
         s, a, r, s_next, done = buffer.sample(batch_size)
@@ -193,6 +199,21 @@ class SAC:
         for t, s_net in zip([self.q1_target, self.q2_target], [self.q1, self.q2]):
             for target_param, param in zip(t.parameters(), s_net.parameters()):
                 target_param.data.copy_(target_param.data * (1.0 - self.tau) + param.data * self.tau)
+
+        # --- NEW: Calculate and return metrics for logging ---
+        current_std = 0.0
+        with torch.no_grad():
+            # Get the current standard deviation from the actor network for the batch
+            _, log_std = self.actor(s)
+            current_std = log_std.exp().mean().item()
+
+        # Return the metrics matching the plotter's expected column names
+        return {
+            "loss_critic": q_loss.item(),
+            "loss_actor": actor_loss.item(),
+            "loss_alpha": alpha_loss.item(), # Specific to SAC
+            "tier_elite_action_std": current_std
+        }
 
     def save_checkpoint(self, path, ep, eval_rewards, seed_logs):  # [PPO] seed_logs parameter added
         """Saves everything needed to resume training and preserve research data."""

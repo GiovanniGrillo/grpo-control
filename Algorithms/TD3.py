@@ -44,7 +44,7 @@ class ReplayBuffer:
 
 
 class Actor(nn.Module):
-    def __init__(self, observation_space, act_dim, act_high, hidden=256):
+    def __init__(self, observation_space, act_dim, act_high, hidden=512):
         super().__init__()
         # Inherit the common FeatureExtractor for image/vector inputs
         self.extractor = bf.FeatureExtractor(observation_space)
@@ -64,7 +64,7 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     """Twin Q-networks."""
-    def __init__(self, observation_space, act_dim, hidden=256):
+    def __init__(self, observation_space, act_dim, hidden=512):
         super().__init__()
         # Q1 Architecture
         self.extractor1 = bf.FeatureExtractor(observation_space)
@@ -99,7 +99,7 @@ class Critic(nn.Module):
 
 class TD3:
     """Twin Delayed Deep Deterministic Policy Gradient (TD3) Agent"""
-    def __init__(self, env, hidden_dim=256, lr=3e-4, gamma=0.99, tau=5e-3,
+    def __init__(self, env, hidden_dim=512, lr=3e-4, gamma=0.99, tau=5e-3,
                  policy_noise=0.2, noise_clip=0.5, policy_delay=2, expl_noise=0.1,
                  start_timesteps=10000, buffer_capacity=100000):
         
@@ -136,6 +136,7 @@ class TD3:
         self.critic_opt = optim.Adam(self.critic.parameters(), lr=lr)
 
         self.updated = False  # Flag to indicate if an update has occurred
+        self.last_actor_loss = 0.0  # Stores the last actor loss due to delayed updates
 
     def consume_update_flag(self):
         if self.updated:
@@ -164,14 +165,17 @@ class TD3:
     def step(self, state, action, reward, next_state, done, pos = None):
         self.memory.push(state, action, reward, next_state, done)
         self.total_steps += 1
+
+        stats = None
     
         # FIX: Update once every 4 steps to drastically reduce compute overhead
         if len(self.memory) >= self.start_timesteps and self.total_steps % 4 == 0:
             # You can do 1 update or multiple, but spacing it out keeps simulation fast
-            self.update(batch_size=256)
-            self.updated = True if self.total_steps % 20000 == 0 else False  # Set flag to indicate an update has occurred
+            stats =self.update(batch_size=256)
 
-        return {}
+            if self.total_steps % 2000 == 0:
+                self.updated = True
+        return stats
 
             
     def update(self, batch_size):
@@ -207,11 +211,23 @@ class TD3:
             actor_loss.backward()
             self.actor_opt.step()
 
+            self.last_actor_loss = actor_loss.item()
+
             # Soft updates for target networks
             for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
             for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
+            
+        # Map exploration noise to the plotter's expected format (constant in standard TD3)
+        current_std = float(self.expl_noise * self.act_high_np[0])
+
+        # Return the metrics matching the plotter's expected column names
+        return {
+            "loss_critic": critic_loss.item(),
+            "loss_actor": self.last_actor_loss,
+            "tier_elite_action_std": current_std
+        }
 
     def save_checkpoint(self, path, ep, eval_rewards, seed_logs = None):
         checkpoint = {
