@@ -224,7 +224,7 @@ class TraumaReplayBuffer:
 
 
 class ContinuousActor(nn.Module):
-    def __init__(self, observation_space, action_space, hidden_dim=512):
+    def __init__(self, observation_space, action_space, hidden_dim=256):
         super().__init__()
         self.extractor = FeatureExtractor(observation_space)
         

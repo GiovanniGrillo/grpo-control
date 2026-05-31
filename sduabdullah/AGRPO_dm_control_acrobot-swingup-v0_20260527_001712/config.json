@@ -1,0 +1,23 @@
+{
+    "Env": "dm_control/acrobot-swingup-v0",
+    "Algo": "AGRPO",
+    "Master_Seeds": [
+        7270,
+        860,
+        5390,
+        5191,
+        5734
+    ],
+    "Max_Episodes": 1000,
+    "Max_Steps": 1000,
+    "N": 20,
+    "K": 1,
+    "lr": 0.0005,
+    "epsilon": 0.4,
+    "lam_s": 0.01,
+    "lam_d": 0.01,
+    "lam_t": 0,
+    "gamma": 0.99,
+    "dbscan_eps": 0.2,
+    "warmup_episodes": 100
+}
