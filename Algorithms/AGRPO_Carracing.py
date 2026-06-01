@@ -18,9 +18,9 @@ class AGRPO:
     """
     Advanced Group Relative Policy Optimization (AGRPO).
     """
-    def __init__(self, env, seed=42, hidden_dim=256, lr=5e-4, N=20, K=1, epsilon=0.4,
-                 tau=0.5, lam_s=0.01, lam_d=0.01, gamma=0.99, dbscan_eps=0.2,
-                 warmup_episodes=100):
+    def __init__(self, env, seed=42, hidden_dim=512, lr=5e-4, N=50, K=3, epsilon=0.4,
+                 tau=0.6, lam_s=0.005, lam_d=0.01, gamma=0.99, dbscan_eps=0.2,
+                 warmup_episodes=100): #tau = 0.5
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
@@ -42,6 +42,9 @@ class AGRPO:
         
         self.return_mean_history = collections.deque(maxlen=20)
         self.return_std_history = collections.deque(maxlen=20)
+
+        # Off-Policy Archive for stable HDBSCAN clustering and robust baselines
+        self.history_buffer = collections.deque(maxlen=10) 
 
         self.current_track_data = None
 
@@ -194,22 +197,11 @@ class AGRPO:
 
         return np.array(all_phi), all_features_np, all_pos_np, all_actions_np
     
-    def _cluster_states(self, all_features_np, all_pos_np, all_actions_np):
-        flat_features = np.concatenate(all_features_np, axis=0)
-        flat_actions = np.concatenate(all_actions_np, axis=0)
-        
-        # UPGRADE: Statt dem kurzsichtigen 1-Step Reward berechnen wir den 
-        # diskontierten zukünftigen Gesamtertrag (Return-to-Go) pro State/Action!
-        all_rtg = []
-        for i in range(len(all_features_np)):
-            rewards = self.buffer.get_latest_trajectory(i)["reward"]
-            # bf.compute_returns_to_go gibt einen PyTorch-Tensor zurück, wir machen Numpy draus
-            rtg = bf.compute_returns_to_go(rewards, self.gamma, self.device).cpu().numpy()
-            all_rtg.append(rtg)
-            
-        flat_rtg = np.concatenate(all_rtg, axis=0)
-
-        # 1. PCA for Latent State Features
+    def _cluster_states(self, flat_features, flat_actions, flat_rtg):
+        """
+        Clusters across the entire historical off-policy archive to build stable manifolds.
+        Takes flattened arrays representing multiple epochs of experience.
+        """
         scaled_features = self.scaler.fit_transform(flat_features)
         pca_dims = 30
         pca_comps = min(pca_dims, flat_features.shape[1])
@@ -238,36 +230,43 @@ class AGRPO:
                          cluster_selection_epsilon=self.dbscan_eps, core_dist_n_jobs=1)
         
         labels = dbscan.fit_predict(combined)
-        traj_lengths = [len(f) for f in all_features_np]
         
-        # LOGGING
+        # Logging applies to the entire historical manifold
         self.last_num_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         self.last_noise_ratio = (labels == -1).sum() / len(labels) if len(labels) > 0 else 0.0
 
-        return labels, traj_lengths
+        return labels
     
-    def _compute_advantages(self, labels, traj_lengths, returns):
-        all_returns_to_go = []
-        for i in range(len(self.actors)):
-            rewards = self.buffer.get_latest_trajectory(i)["reward"]
-            rtg = bf.compute_returns_to_go(rewards, self.gamma, self.device)
-            all_returns_to_go.append(rtg)
+    def _compute_advantages(self, current_traj_lengths, full_labels, flat_rtg):
+        """
+        Calculates baselines from the entire historical archive, but only evaluates 
+        advantages for the current generation to ensure valid On-Policy gradients.
+        """
+        flat_rtg_t = torch.from_numpy(flat_rtg).to(self.device).float()
+        labels_t = torch.from_numpy(full_labels).to(self.device).long()
 
-        flat_returns = torch.cat(all_returns_to_go)
-        labels_t = torch.from_numpy(labels).to(self.device).long()
-
-        max_label = int(labels.max())
+        # 1. Build robust baselines using ALL historical data in the clusters
+        max_label = int(full_labels.max())
         means_vec = torch.zeros(max_label + 2, device=self.device)
-        means_vec[0] = flat_returns.mean() 
+        means_vec[0] = flat_rtg_t.mean() # Global fallback for noise (-1)
+        
         for c in torch.unique(labels_t):
             c_val = int(c.item())
             if c_val != -1:
-                m = flat_returns[labels_t == c_val].mean()
+                m = flat_rtg_t[labels_t == c_val].mean()
                 means_vec[c_val + 1] = m
 
-        flat_baselines = means_vec[labels_t + 1]
-        flat_advantages = flat_returns - flat_baselines
-        advantages = list(torch.split(flat_advantages, traj_lengths))
+        # 2. Extract labels and returns ONLY for the current generation
+        # The current generation is appended at the very end of the flattened arrays
+        current_total_steps = sum(current_traj_lengths)
+        current_labels_t = labels_t[-current_total_steps:]
+        current_rtg_t = flat_rtg_t[-current_total_steps:]
+
+        # 3. Calculate advantages for the current generation against historical baselines
+        flat_baselines = means_vec[current_labels_t + 1]
+        flat_advantages = current_rtg_t - flat_baselines
+        
+        advantages = list(torch.split(flat_advantages, current_traj_lengths))
         return advantages
     
     def _compute_exp_diversity(self, i, current_mu, all_mus, current_lam_d):
@@ -312,12 +311,12 @@ class AGRPO:
         plt.savefig('plots/exploration_health.png')
         plt.close()
 
-    def _set_action_std_for_role(self, actor, role, ep, min_std_mids):
+    def _set_action_std_for_role(self, actor, role, ep, min_std_mids, max_std):
         actor.log_std.requires_grad = False
         if ep < self.warmup_episodes:
             target_std = 0.6
         elif role == "scout":
-            target_std = 0.6
+            target_std = min(0.6, max_std)
         elif role == "elite":
             target_std = min_std_mids / 3.0
         else:
@@ -332,11 +331,11 @@ class AGRPO:
         if ep < self.warmup_episodes:
             mid_std = max(std_warmup_end, std_start - (ep/self.warmup_episodes) * (std_start - std_warmup_end))
         else:
-            decay_lambda = 0.006931
+            decay_lambda = 0.069315
             time_passed = ep - self.warmup_episodes
             mid_std = std_final_floor + (std_warmup_end - std_final_floor) * np.exp(-decay_lambda * time_passed)
 
-        max_warmup = 4 * self.warmup_episodes
+        max_warmup = 2 * self.warmup_episodes
         std_max_floor = std_final_floor + 0.45
 
         if ep < max_warmup:
@@ -345,7 +344,7 @@ class AGRPO:
             time_passed_max = ep - max_warmup
             max_std = std_max_floor + (std_start - std_max_floor) * np.exp(-decay_lambda * time_passed_max)
 
-        max_std = max(max_std, mid_std + 1e-3)
+        # max_std = max(max_std, mid_std + 1e-3)
         current_lam_d = self.lam_d * (mid_std / 0.5) if ep >= self.warmup_episodes else 0.0
 
         all_rtg_lists = []
@@ -369,11 +368,11 @@ class AGRPO:
                 self.old_actors[i].load_state_dict(self.actors[i].state_dict())
 
                 if i in scout_idx:
-                    self._set_action_std_for_role(self.actors[i], "scout", ep, mid_std)
+                    self._set_action_std_for_role(self.actors[i], "scout", ep, mid_std, max_std)
                 elif i in elite_idx:
-                    self._set_action_std_for_role(self.actors[i], "elite", ep, mid_std)
+                    self._set_action_std_for_role(self.actors[i], "elite", ep, mid_std, max_std)
                 else:
-                    self._set_action_std_for_role(self.actors[i], "mid", ep, mid_std)
+                    self._set_action_std_for_role(self.actors[i], "mid", ep, mid_std, max_std)
 
                 sum_actual_std += torch.exp(self.actors[i].log_std).mean().item()
                 traj_rewards = self.buffer.get_latest_trajectory(i)["reward"]
@@ -387,7 +386,34 @@ class AGRPO:
         # 3. METRIC EXTRACTION & CLUSTERING
         ################################################################################
         phi, features_np, all_pos_np, all_actions_np = self._gather_metrics()
-        labels, traj_lengths = self._cluster_states(features_np, all_pos_np, all_actions_np)
+        
+        # Calculate Returns-To-Go for current generation
+        current_rtgs = []
+        for i in range(len(features_np)):
+            rewards = self.buffer.get_latest_trajectory(i)["reward"]
+            rtg = bf.compute_returns_to_go(rewards, self.gamma, self.device).cpu().numpy()
+            current_rtgs.append(rtg)
+
+        # Store the current generation's raw behavior in the Off-Policy Archive
+        self.history_buffer.append({
+            'features': features_np,
+            'actions': all_actions_np,
+            'rtg': current_rtgs
+        })
+
+        # Flatten the entire archive for stabilized historical clustering
+        archived_features, archived_actions, archived_rtgs = [], [], []
+        for hist in self.history_buffer:
+            archived_features.extend(hist['features'])
+            archived_actions.extend(hist['actions'])
+            archived_rtgs.extend(hist['rtg'])
+
+        flat_features = np.concatenate(archived_features, axis=0)
+        flat_actions = np.concatenate(archived_actions, axis=0)
+        flat_rtg = np.concatenate(archived_rtgs, axis=0)
+
+        # Cluster across time
+        full_labels = self._cluster_states(flat_features, flat_actions, flat_rtg)
 
         current_returns = np.array(returns_for_ranking)
         self.return_mean_history.append(np.mean(current_returns))
@@ -396,15 +422,16 @@ class AGRPO:
         current_std = np.std(current_returns)
         if current_std > 1e-4:
             self.running_reward_std = 0.9 * self.running_reward_std + 0.1 * current_std
-        reward_scale = self.running_reward_std
+        reward_scale = max(1.0, self.running_reward_std)
 
         ################################################################################
         # 4. ADVANTAGE NORMALIZATION & PRE-COMPUTATION
         ################################################################################
-        advantages = self._compute_advantages(labels, traj_lengths, returns_for_ranking)
+        traj_lengths = [len(f) for f in features_np]
+        advantages = self._compute_advantages(traj_lengths, full_labels, flat_rtg)
 
         phi_norm = (phi - phi.mean(axis=0)) / (phi.std(axis=0) + 1e-8)
-        current_K = max(1, int(self.N / 15))
+        current_K = max(1, int(self.N / 12))                                                                            #15
         groups = KMeans(n_clusters=min(current_K, len(self.actors)), n_init='auto').fit_predict(phi_norm)
         normalized_advantages = bf.normalize_advantages_by_group(advantages, groups, self.device)
         sigma_global = torch.cat(normalized_advantages).std() + 1e-8
@@ -438,7 +465,7 @@ class AGRPO:
         ################################################################################
         loss_stats = {"actor_loss": 0.0, "smooth_loss": 0.0, "div_loss": 0.0, "ppo_ratio": 0.0, "grad_norm": 0.0}
         updated_agents_count = 0
-        PPO_EPOCHS = 10
+        PPO_EPOCHS = 5
         BATCH_SIZE = 10
         div_violators_indices = []
 
@@ -464,7 +491,7 @@ class AGRPO:
                     if i in elite_idx:
                         role_lam_d = 0.0
                     elif i in scout_idx:
-                        role_lam_d = current_lam_d * 30.0
+                        role_lam_d = current_lam_d * 10.0
                     else:
                         role_lam_d = current_lam_d
 
@@ -646,8 +673,16 @@ class AGRPO:
             'optimizers_state_dict': [opt.state_dict() for opt in self.optimizers],
             'buffer_data': self.buffer.buffers,
             'current_episodes': getattr(self.buffer, 'current_episodes', None),
+            
             'scaler': self.scaler,
-            'pca': self.pca
+            'action_scaler': self.action_scaler, 
+            'pca': self.pca,
+            'history_buffer': self.history_buffer,
+            
+            'elite_return_history': self.elite_return_history,
+            'return_mean_history': self.return_mean_history,
+            'return_std_history': self.return_std_history,
+            'running_reward_std': self.running_reward_std
         }
         torch.save(checkpoint, path)
 
@@ -667,13 +702,23 @@ class AGRPO:
 
         for opt, state in zip(self.optimizers, ckpt['optimizers_state_dict']):
             opt.load_state_dict(state)
+            
         self.current_policy_idx = ckpt['current_policy_idx']
         self.buffer.buffers = ckpt['buffer_data']
 
         if ckpt.get('current_episodes') is not None:
             self.buffer.current_episodes = ckpt['current_episodes']
 
+        # --- Wiederherstellung der Pipeline ---
         self.scaler = ckpt.get('scaler', StandardScaler())
+        self.action_scaler = ckpt.get('action_scaler', StandardScaler())
         self.pca = ckpt.get('pca', None)
+        self.history_buffer = ckpt.get('history_buffer', collections.deque(maxlen=10))
+        
+        # --- Wiederherstellung der Metriken ---
+        self.elite_return_history = ckpt.get('elite_return_history', collections.deque(maxlen=10))
+        self.return_mean_history = ckpt.get('return_mean_history', collections.deque(maxlen=20))
+        self.return_std_history = ckpt.get('return_std_history', collections.deque(maxlen=20))
+        self.running_reward_std = ckpt.get('running_reward_std', 1.0)
         
         return ckpt

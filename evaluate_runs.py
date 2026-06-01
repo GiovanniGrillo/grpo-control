@@ -5,13 +5,15 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 import glob
 
+from wsgiref.types import StartResponse
+
 def plot_with_variance(ax, episodes, mean_series, std_series, color, label):
     """Hilfsfunktion für das Plotten von Linien mit Standardabweichungs-Schatten."""
     
     mask = ~mean_series.isna()
     
     if not mask.any():
-        return # Keine Daten zum Plotten vorhanden
+        return 
         
     valid_episodes = episodes[mask]
     valid_mean = mean_series[mask]
@@ -19,10 +21,12 @@ def plot_with_variance(ax, episodes, mean_series, std_series, color, label):
     ax.plot(valid_episodes, valid_mean, color=color, label=label, linewidth=2)
     
     if not std_series.isna().all():
-        valid_std = std_series[mask]
+        #valid_std = std_series[mask]
+        valid_std = std_series[mask].interpolate(method='linear').fillna(0)
+
         ax.fill_between(valid_episodes, valid_mean - valid_std, valid_mean + valid_std, color=color, alpha=0.2)
 
-def generate_plots_for_run(run_dir):
+def generate_plots_for_run(run_dir, steps_per_episode=1000):
     metrics_path = os.path.join(run_dir, "metrics.csv")
     
     if not os.path.exists(metrics_path):
@@ -63,6 +67,8 @@ def generate_plots_for_run(run_dir):
     df_mean.replace([np.inf, -np.inf], np.nan, inplace=True)
     
     episodes = df_mean.index
+    training_steps = episodes * steps_per_episode
+    
     plot_dir = os.path.join(run_dir, "plots")
     os.makedirs(plot_dir, exist_ok=True)
 
@@ -72,9 +78,9 @@ def generate_plots_for_run(run_dir):
     if 'eval_reward' in df_mean.columns:
         plt.figure(figsize=(10, 6))
         ax = plt.gca()
-        plot_with_variance(ax, episodes, df_mean['eval_reward'], df_std['eval_reward'], '#1f77b4', 'Eval Reward (Total)')
+        plot_with_variance(ax, training_steps, df_mean['eval_reward'], df_std['eval_reward'], '#1f77b4', 'Eval Reward (Total)')
         plt.title('Learning Curve (Average over Seeds)')
-        plt.xlabel('Episodes')
+        plt.xlabel('Training Steps')
         plt.ylabel('Reward')
         plt.grid(True, alpha=0.3)
         plt.legend()
@@ -93,12 +99,12 @@ def generate_plots_for_run(run_dir):
         
         colors = ['#d62728', '#9467bd', '#2ca02c', '#ff7f0e']
         for ax, loss_col, color in zip(axs, available_losses, colors):
-            plot_with_variance(ax, episodes, df_mean[loss_col], df_std[loss_col], color, loss_col.replace('loss_', '').capitalize() + ' Loss')
+            plot_with_variance(ax, training_steps, df_mean[loss_col], df_std[loss_col], color, loss_col.replace('loss_', '').capitalize() + ' Loss')
             ax.set_ylabel('Loss Value')
             ax.legend()
             ax.grid(True, alpha=0.3)
             
-        axs[-1].set_xlabel('Episodes')
+        axs[-1].set_xlabel('Training Steps')
         fig.suptitle('Optimization Losses', fontsize=14)
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, '2_losses.png'), dpi=300)
@@ -111,12 +117,12 @@ def generate_plots_for_run(run_dir):
     if all(t in df_mean.columns for t in tiers):
         plt.figure(figsize=(10, 6))
         ax = plt.gca()
-        plot_with_variance(ax, episodes, df_mean['tier_elite_return_avg'], df_std['tier_elite_return_avg'], '#2ca02c', 'Elite Tier')
-        plot_with_variance(ax, episodes, df_mean['tier_mid_return_avg'], df_std['tier_mid_return_avg'], '#1f77b4', 'Mid Tier')
-        plot_with_variance(ax, episodes, df_mean['tier_scout_return_avg'], df_std['tier_scout_return_avg'], '#ff7f0e', 'Scout Tier')
+        plot_with_variance(ax, training_steps, df_mean['tier_elite_return_avg'], df_std['tier_elite_return_avg'], '#2ca02c', 'Elite Tier')
+        plot_with_variance(ax, training_steps, df_mean['tier_mid_return_avg'], df_std['tier_mid_return_avg'], '#1f77b4', 'Mid Tier')
+        plot_with_variance(ax, training_steps, df_mean['tier_scout_return_avg'], df_std['tier_scout_return_avg'], '#ff7f0e', 'Scout Tier')
         
         plt.title('Performance by Population Tier')
-        plt.xlabel('Episodes')
+        plt.xlabel('Training Steps')
         plt.ylabel('Return')
         plt.grid(True, alpha=0.3)
         plt.legend()
@@ -130,22 +136,22 @@ def generate_plots_for_run(run_dir):
     if all(s in df_mean.columns for s in std_tiers):
         plt.figure(figsize=(10, 6))
         ax = plt.gca()
-        
+        training_steps = episodes * steps_per_episode
         mask = ~df_mean['tier_elite_action_std'].isna()
-        valid_episodes = episodes[mask]
+        valid_training_steps = training_steps[mask]
         
         if mask.any():
-            ax.plot(valid_episodes, df_mean.loc[mask, 'tier_elite_action_std'], color='#2ca02c', label='Elite STD', linewidth=2)
-            ax.plot(valid_episodes, df_mean.loc[mask, 'tier_mid_action_std'], color='#1f77b4', label='Mid STD', linewidth=2)
-            ax.plot(valid_episodes, df_mean.loc[mask, 'tier_scout_action_std'], color='#ff7f0e', label='Scout STD', linewidth=2)
+            ax.plot(valid_training_steps, df_mean.loc[mask, 'tier_elite_action_std'], color='#2ca02c', label='Elite STD', linewidth=2)
+            ax.plot(valid_training_steps, df_mean.loc[mask, 'tier_mid_action_std'], color='#1f77b4', label='Mid STD', linewidth=2)
+            ax.plot(valid_training_steps, df_mean.loc[mask, 'tier_scout_action_std'], color='#ff7f0e', label='Scout STD', linewidth=2)
             
             if 'target_min_std' in df_mean.columns and 'target_max_std' in df_mean.columns:
-                ax.plot(valid_episodes, df_mean.loc[mask, 'target_min_std'], color='#d62728', linestyle='--', label='Min Floor')
-                ax.plot(valid_episodes, df_mean.loc[mask, 'target_max_std'], color='#7f7f7f', linestyle='--', label='Max Ceiling')
-                ax.fill_between(valid_episodes, df_mean.loc[mask, 'target_min_std'], df_mean.loc[mask, 'target_max_std'], color='gray', alpha=0.1)
+                ax.plot(valid_training_steps, df_mean.loc[mask, 'target_min_std'], color='#d62728', linestyle='--', label='Min Floor')
+                ax.plot(valid_training_steps, df_mean.loc[mask, 'target_max_std'], color='#7f7f7f', linestyle='--', label='Max Ceiling')
+                ax.fill_between(valid_training_steps, df_mean.loc[mask, 'target_min_std'], df_mean.loc[mask, 'target_max_std'], color='gray', alpha=0.1)
 
             plt.title('Action Variance (Exploration vs Exploitation)')
-            plt.xlabel('Episodes')
+            plt.xlabel('Training Steps')
             plt.ylabel('Standard Deviation of Actions')
             plt.yscale('log')
             plt.grid(True, which="both", alpha=0.3)
@@ -163,9 +169,9 @@ def generate_plots_for_run(run_dir):
         mask1 = ~df_mean['trauma_centers_count'].isna()
         
         if mask1.any():
-            ax1.set_xlabel('Episodes')
+            ax1.set_xlabel('Training Steps')
             ax1.set_ylabel('Active Trauma Centers', color=color1)
-            ax1.plot(episodes[mask1], df_mean.loc[mask1, 'trauma_centers_count'], color=color1, label='Memory Size', linewidth=2)
+            ax1.plot(training_steps[mask1], df_mean.loc[mask1, 'trauma_centers_count'], color=color1, label='Memory Size', linewidth=2)
             ax1.tick_params(axis='y', labelcolor=color1)
             
             ax2 = ax1.twinx()  
@@ -174,7 +180,7 @@ def generate_plots_for_run(run_dir):
             mask2 = ~df_mean['trauma_threshold'].isna()
             if mask2.any():
                 ax2.set_ylabel('Trauma Trigger Threshold', color=color2)  
-                ax2.plot(episodes[mask2], df_mean.loc[mask2, 'trauma_threshold'], color=color2, linestyle='--', label='Threshold Limit', alpha=0.7)
+                ax2.plot(training_steps[mask2], df_mean.loc[mask2, 'trauma_threshold'], color=color2, linestyle='--', label='Threshold Limit', alpha=0.7)
                 ax2.tick_params(axis='y', labelcolor=color2)
 
             fig.suptitle('Trauma Memory Dynamics')
@@ -193,15 +199,15 @@ def generate_plots_for_run(run_dir):
         mask = ~df_mean['cluster_count'].isna()
         
         if mask.any():
-            ax1.set_xlabel('Episodes')
+            ax1.set_xlabel('Training Steps')
             ax1.set_ylabel('Number of Clusters', color=color1)
-            ax1.plot(episodes[mask], df_mean.loc[mask, 'cluster_count'], color=color1, linewidth=2)
+            ax1.plot(training_steps[mask], df_mean.loc[mask, 'cluster_count'], color=color1, linewidth=2)
             ax1.tick_params(axis='y', labelcolor=color1)
             
             ax2 = ax1.twinx()  
             color2 = '#bcbd22'
             ax2.set_ylabel('Noise Ratio (-1)', color=color2)  
-            ax2.plot(episodes[mask], df_mean.loc[mask, 'cluster_noise_ratio'], color=color2, linestyle='-.', linewidth=2)
+            ax2.plot(training_steps[mask], df_mean.loc[mask, 'cluster_noise_ratio'], color=color2, linestyle='-.', linewidth=2)
             ax2.tick_params(axis='y', labelcolor=color2)
 
             fig.suptitle('Latent Space Clustering Health')
@@ -216,13 +222,13 @@ def generate_plots_for_run(run_dir):
         fig, ax1 = plt.subplots(figsize=(10, 6))
         
         mask = ~df_mean['div_violators'].isna()
-        valid_episodes = episodes[mask]
+        valid_training_steps = training_steps[mask]
         
         if mask.any():
-            plot_with_variance(ax1, valid_episodes, df_mean.loc[mask, 'div_violators'], df_std.loc[mask, 'div_violators'], '#9467bd', 'Agents > Tau')
+            plot_with_variance(ax1, valid_training_steps, df_mean.loc[mask, 'div_violators'], df_std.loc[mask, 'div_violators'], '#9467bd', 'Agents > Tau')
             
             plt.title('Diversity Pressure vs Population Size')
-            ax1.set_xlabel('Episodes')
+            ax1.set_xlabel('Training Steps')
             ax1.set_ylabel('Number of Agents', color='#9467bd')
             ax1.tick_params(axis='y', labelcolor='#9467bd')
             
@@ -235,7 +241,7 @@ def generate_plots_for_run(run_dir):
                 color_pop = '#333333'
                 mask_pop = ~df_mean['population_size'].isna()
                 if mask_pop.any():
-                    ax2.plot(episodes[mask_pop], df_mean.loc[mask_pop, 'population_size'], color=color_pop, linestyle=':', linewidth=2.5, label='Population (N)')
+                    ax2.plot(training_steps[mask_pop], df_mean.loc[mask_pop, 'population_size'], color=color_pop, linestyle=':', linewidth=2.5, label='Population (N)')
                     ax2.set_ylabel('Total Population Size', color=color_pop)
                     ax2.tick_params(axis='y', labelcolor=color_pop)
                     
@@ -253,7 +259,7 @@ def generate_plots_for_run(run_dir):
 
     print(f"-> Successfully created up to 7 plots in {plot_dir}/")
 
-def compare_runs(runs_dict, output_dir="runs/Comparison"):
+def compare_runs(runs_dict, output_dir="runs/Comparison", training_steps_per_episode=1000, max_episodes=None, smoothing_window=10):
     """
     Compare multiple runs across the 7 predefined plot categories.
     runs_dict: Dictionary in the form {"Desired Label Name": "path/to/run_folder"}
@@ -271,12 +277,21 @@ def compare_runs(runs_dict, output_dir="runs/Comparison"):
             continue
             
         df = pd.read_csv(metrics_path)
+
+        if max_episodes is not None:
+            df = df[df['episode'] < max_episodes]
+
         if df.empty or 'episode' not in df.columns:
             continue
             
         grouped = df.groupby('episode')
         df_mean = grouped.mean()
         df_std = grouped.std()
+
+        if smoothing_window > 1:
+            df_mean = df_mean.rolling(window=smoothing_window, min_periods=1).mean()
+            df_std = df_std.rolling(window=smoothing_window, min_periods=1).mean()
+
         df_mean.replace([np.inf, -np.inf], np.nan, inplace=True)
         
         run_data_cache[label] = {
@@ -296,14 +311,14 @@ def compare_runs(runs_dict, output_dir="runs/Comparison"):
             df_std = data['std']
             
             if metric in df_mean.columns:
-                episodes = df_mean.index
+                training_steps = df_mean.index * training_steps_per_episode
                 color = colors[i % len(colors)]
-                plot_with_variance(ax, episodes, df_mean[metric], df_std[metric], color, label)
+                plot_with_variance(ax, training_steps, df_mean[metric], df_std[metric], color, label)
                 data_found = True
                 
         if data_found:
             ax.set_title(title)
-            ax.set_xlabel('Episodes')
+            ax.set_xlabel('Training Steps')
             ax.set_ylabel(y_label)
             if log_scale:
                 ax.set_yscale('log')
@@ -442,43 +457,48 @@ if __name__ == "__main__":
     runs_dir = "runs"
     
     # --- 1. Individual Plots ---
-    if not os.path.exists(runs_dir):
-        print(f"Directory '{runs_dir}' not found. Ensure you are running this from the main folder.")
-    else:
-        all_runs = [os.path.join(runs_dir, d) for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))]
+    # if not os.path.exists(runs_dir):
+    #     print(f"Directory '{runs_dir}' not found. Ensure you are running this from the main folder.")
+    # else:
+    #     all_runs = [os.path.join(runs_dir, d) for d in os.listdir(runs_dir) if os.path.isdir(os.path.join(runs_dir, d))]
         
-        if not all_runs:
-            print("No experiment folders found in 'runs/'.")
-        else:
-            print(f"Found {len(all_runs)} runs. Starting analysis...")
-            for run_path in all_runs:
-                generate_plots_for_run(run_path)
+    #     if not all_runs:
+    #         print("No experiment folders found in 'runs/'.")
+    #     else:
+    #         print(f"Found {len(all_runs)} runs. Starting analysis...")
+    #         for run_path in all_runs:
+    #             generate_plots_for_run(run_path)
             
-            print("\nAll individual plotting complete!")
+    #         print("\nAll individual plotting complete!")
 
     # --- 2. Comparison-Plots ---
-    """print("\nStarting comparison plots...")
+    print("\nStarting comparison plots...")
 
     runs_to_compare_Cartpole = {
-        "AGRPO_N100_popcull": "runs/N100_pop_cull/AGRPO_dm_control_cartpole-swingup-v0_20260515_134323",  
-        "AGRPO_mem_N50": "runs/N50_memory/AGRPO_dm_control_cartpole-swingup-v0_20260515_185707",
-        "AGRPO_baseline_N50": "runs/N50_all_loss/AGRPO_dm_control_cartpole-swingup-v0_20260513_171600"
+        # "AGRPO": f"{runs_dir}/AGRPO_dm_control_cartpole-swingup-v0_20260601_084504",  
+        "PPO": f"{runs_dir}/PPO_dm_control_cartpole-swingup-v0_20260529_131912",
+        "TD3": f"{runs_dir}/TD3_dm_control_cartpole-swingup-v0_20260529_155850",
+        "SAC": f"{runs_dir}/SAC_dm_control_cartpole-swingup-v0_20260529_184717",
+        # "AGRPO": f"{runs_dir}/AGRPO_dm_control_cartpole-swingup-v0_20260601_084504",
+        "AGRPO": f"{runs_dir}/AGRPO_dm_control_cartpole-swingup-v0_20260526_004219"
     }
     
-    compare_runs(runs_to_compare_Cartpole, output_dir="runs/comparison_cartpole_plots")
+    compare_runs(runs_to_compare_Cartpole, output_dir=f"{runs_dir}/comparison_cartpole_plots", training_steps_per_episode=1000, max_episodes=1000)
 
-    runs_to_compare_Acrobot = {
-        "AGRPO_N100_popcull": "runs/N100_pop_cull/AGRPO_dm_control_acrobot-swingup-v0_20260515_142111",  
-        "AGRPO_mem_N50": "runs/N50_memory/AGRPO_dm_control_acrobot-swingup-v0_20260515_194206",
-        "AGRPO_baseline_N50": "runs/N50_all_loss/AGRPO_dm_control_acrobot-swingup-v0_20260513_175454"
+    runs_to_compare_Acrobot = { 
+        "PPO": f"{runs_dir}/PPO_dm_control_acrobot-swingup-v0_20260529_143928",
+        "TD3": f"{runs_dir}/TD3_dm_control_acrobot-swingup-v0_20260529_172652",
+        "SAC": f"{runs_dir}/SAC_dm_control_acrobot-swingup-v0_20260530_000230",
+        "AGRPO": f"{runs_dir}/AGRPO_dm_control_acrobot-swingup-v0_20260526_022551"
     }
     
-    compare_runs(runs_to_compare_Acrobot, output_dir="runs/comparison_acrobot_plots")
+    compare_runs(runs_to_compare_Acrobot, output_dir=f"{runs_dir}/comparison_acrobot_plots", training_steps_per_episode=1000, max_episodes=1000)
 
     runs_to_compare_Carracing = {
-        "AGRPO_N100_popcull": "runs/N100_pop_cull/AGRPO_CarRacing-v3_20260515_145522",  
-        "AGRPO_mem_N50": "runs/N50_memory/AGRPO_CarRacing-v3_20260516_171029",
-        "AGRPO_baseline_N50": "runs/N50_all_loss/AGRPO_CarRacing-v3_20260513_182950"
+        "PPO": f"{runs_dir}/PPO_CarRacing-v3_20260530_050807",
+        "TD3": f"{runs_dir}/TD3_CarRacing-v3_20260530_223559",
+        "SAC": f"{runs_dir}/SAC_CarRacing-v3_20260601_110543",
+        "AGRPO": f"{runs_dir}/AGRPO_CarRacing-v3_20260530_104303"
     }
     
-    compare_runs(runs_to_compare_Carracing, output_dir="runs/comparison_carracing_plots")"""
+    compare_runs(runs_to_compare_Carracing, output_dir=f"{runs_dir}/comparison_carracing_plots", training_steps_per_episode=500)

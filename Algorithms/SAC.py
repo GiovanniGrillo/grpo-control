@@ -21,9 +21,16 @@ class ReplayBuffer:
         self.position = 0
 
     def push(self, state, action, reward, next_state, done):
+        # Store as lightweight numpy arrays with explicit dtypes to minimize
+        # work when converting to torch tensors later.
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = (state, action, reward, next_state, done)
+        s = np.asarray(state, dtype=np.float32)
+        a = np.asarray(action, dtype=np.float32)
+        r = float(reward)
+        s_next = np.asarray(next_state, dtype=np.float32)
+        d = bool(done)
+        self.buffer[self.position] = (s, a, r, s_next, d)
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size):
@@ -87,6 +94,9 @@ class SAC:
     """Soft Actor-Critic Agent."""
     def __init__(self, env, hidden_dim=512, lr=3e-4, gamma=0.99, tau=0.005, alpha=0.2, buffer_capacity=10000):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Enable cuDNN autotuner for potential CNN speedups on fixed-size inputs
+        if self.device.type == "cuda":
+            torch.backends.cudnn.benchmark = True
         self.gamma, self.tau = gamma, tau
         self.memory = ReplayBuffer(capacity=buffer_capacity)
         self.total_steps = 0
@@ -128,10 +138,11 @@ class SAC:
         return False
 
     def select_action(self, state, evaluate=False):
-        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        state = torch.as_tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         if evaluate:
-            mu, _ = self.actor(state)
-            return torch.tanh(mu).detach().cpu().numpy()[0]
+            with torch.no_grad():
+                mu, _ = self.actor(state)
+                return torch.tanh(mu).detach().cpu().numpy()[0]
         action, _ = self.actor.sample(state)
         action_array = action.detach().cpu().numpy()[0]
         if self.is_discrete:
@@ -157,7 +168,12 @@ class SAC:
 
     def update(self, buffer, batch_size):
         s, a, r, s_next, done = buffer.sample(batch_size)
-        s, a, r, s_next, done = map(lambda x: torch.FloatTensor(x).to(self.device), [s, a, r, s_next, done])
+        # Convert to tensors directly on the target device to avoid extra copies
+        s = torch.as_tensor(s, dtype=torch.float32, device=self.device)
+        a = torch.as_tensor(a, dtype=torch.float32, device=self.device)
+        r = torch.as_tensor(r, dtype=torch.float32, device=self.device)
+        s_next = torch.as_tensor(s_next, dtype=torch.float32, device=self.device)
+        done = torch.as_tensor(done, dtype=torch.float32, device=self.device)
         r, done = r.unsqueeze(1), done.unsqueeze(1)
 
         if self.is_discrete:
@@ -222,7 +238,7 @@ class SAC:
             'eval_rewards': eval_rewards,
             'seed_logs': seed_logs,              # [PPO]
             'total_steps': self.total_steps,
-            'log_alpha': self.log_alpha,
+            'log_alpha': self.log_alpha.detach().cpu().item(),
             # Networks
             'actor_state_dict': self.actor.state_dict(),
             'q1_state_dict': self.q1.state_dict(),
@@ -254,7 +270,12 @@ class SAC:
         self.alpha_opt.load_state_dict(ckpt['alpha_opt_state_dict'])
 
         # Restore Scalars & Tensors
-        self.log_alpha.data.copy_(ckpt['log_alpha'])
+        # `log_alpha` saved as scalar; restore to tensor safely on device
+        try:
+            self.log_alpha.data.copy_(torch.tensor(ckpt['log_alpha'], device=self.device))
+        except Exception:
+            # Fallback if ckpt stores tensor-like object
+            self.log_alpha.data.copy_(torch.as_tensor(ckpt['log_alpha']).to(self.device))
         self.total_steps = ckpt['total_steps']
         self.memory.buffer = ckpt['buffer']
 

@@ -7,11 +7,9 @@ import os
 import Algorithms.SAC as SAC
 import Algorithms.PPO as PPO
 import Algorithms.TD3 as TD3
-import Algorithms.GRPO as GRPO
-import Algorithms.CGRPO as CGRPO
+
 import Algorithms.AGRPO as AGRPO
-#import Algorithms.AGRPO_berhan as AGRPO
-import Algorithms.AGRPO_memory as AGRPO_mem
+import Algorithms.AGRPO_Carracing as AGRPO_mem
 import time
 import numpy as np
 import utils as bf
@@ -23,6 +21,9 @@ import warnings
 import platform
 
 os.environ["USE_NNPACK"] = "0"
+
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+os.environ["MUJOCO_GL"] = "egl"
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 def set_seed(seed: int):
@@ -237,7 +238,6 @@ if __name__ == '__main__':
         "TD3": TD3.TD3,
         "PPO": PPO.PPO,
         "SAC": SAC.SAC,
-        "CGRPO": CGRPO.CGRPO,
         "AGRPO": AGRPO.AGRPO,
         "AGRPO_mem": AGRPO_mem.AGRPO
     }
