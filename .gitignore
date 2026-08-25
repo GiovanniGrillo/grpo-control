@@ -16,6 +16,7 @@ run_times.json
 venv/
 .env
 .venv/
+.vscode/
 # Hardware specific
 .DS_Store
 Thumbs.db
