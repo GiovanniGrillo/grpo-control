@@ -11,7 +11,6 @@ import Algorithms.GRPO as GRPO
 import Algorithms.CGRPO as CGRPO
 import Algorithms.AGRPO as AGRPO
 #import Algorithms.AGRPO_berhan as AGRPO
-import Algorithms.AGRPO_memory as AGRPO_mem
 import time
 import numpy as np
 import utils as bf
@@ -238,8 +237,7 @@ if __name__ == '__main__':
         "PPO": PPO.PPO,
         "SAC": SAC.SAC,
         "CGRPO": CGRPO.CGRPO,
-        "AGRPO": AGRPO.AGRPO,
-        "AGRPO_mem": AGRPO_mem.AGRPO
+        "AGRPO": AGRPO.AGRPO
     }
 
     RUN_MODE = os.getenv("RUN_MODE", "full").strip().lower() 
