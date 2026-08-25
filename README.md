@@ -14,6 +14,10 @@ This codebase compares a population-based GRPO family against PPO, SAC, and TD3 
 - `logger.py`: run-folder creation and metric export.
 - `evaluate_runs.py`: plotting and comparison utilities.
 
+## Archived material
+
+- `archive/legacy/`: historical scripts and older AGRPO/CGRPO variants kept for reference, not for the main runnable path.
+
 ## Final deliverables
 
 - `GRPO_Project.pdf`: final written report.
@@ -31,6 +35,7 @@ These are experiment outputs and stay out of the main source deliverable:
 - `sduabdullah/`
 - `sdumelih/`
 - `sdurobin/`
+- `run_times.json`
 
 ## Reproducibility
 
@@ -41,5 +46,5 @@ These are experiment outputs and stay out of the main source deliverable:
 ## Maintenance notes
 
 - Keep `main` focused on the final runnable pipeline.
-- Historical files such as `*_old.py` and `*_archive.py` are archival, not the main path.
+- Historical files now live under `archive/legacy/` instead of the root path.
 - `Algorithms/` is an explicit Python package for cleaner imports and editor support.
