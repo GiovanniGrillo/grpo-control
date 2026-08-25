@@ -1,13 +1,4 @@
 # grpo-control
-
-Reinforcement learning project focused on comparing population-based GRPO variants against PPO, SAC, and TD3 on continuous control and racing tasks.
-
-This project covers two main families of environments:
-- `dm_control/cartpole-swingup-v0` and `dm_control/acrobot-swingup-v0`: classical continuous-control benchmarks.
-- `CarRacing-v3`: a driving/racing environment requiring stable control and long-horizon decision making.
-
-## Tech Stack
-
 <div align="left">
   <img src="https://img.shields.io/badge/Python-3.12.9-3776AB?logo=python&logoColor=white" alt="Python 3.12.9" />
   <img src="https://img.shields.io/badge/PyTorch-2.11.0%2Bcu130-EE4C2C?logo=pytorch&logoColor=white" alt="PyTorch 2.11.0+cu130" />
@@ -16,6 +7,12 @@ This project covers two main families of environments:
   <img src="https://img.shields.io/badge/JAX-0.9.2-FF6F00?logo=python&logoColor=white" alt="JAX 0.9.2" />
   <img src="https://img.shields.io/badge/NumPy-2.4.3-013243?logo=numpy&logoColor=white" alt="NumPy 2.4.3" />
 </div>
+
+Reinforcement learning project focused on comparing population-based GRPO variants against PPO, SAC, and TD3 on continuous control and racing tasks.
+
+This project covers two main families of environments:
+- `dm_control/cartpole-swingup-v0` and `dm_control/acrobot-swingup-v0`: classical continuous-control benchmarks.
+- `CarRacing-v3`: a driving/racing environment requiring stable control and long-horizon decision making.
 
 ## Project Structure
 
