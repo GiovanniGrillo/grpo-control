@@ -1,1 +1,0 @@
-Total Run Time for AGRPO on dm_control/acrobot-swingup-v0: 16507.27 seconds
