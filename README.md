@@ -1,32 +1,29 @@
 # grpo-control
 
-Reinforcement Learning project.
+Final Reinforcement Learning project repository.
 
 This codebase compares a population-based GRPO family against PPO, SAC, and TD3 on `dm_control/cartpole-swingup-v0`, `dm_control/acrobot-swingup-v0`, and `CarRacing-v3`.
 
-## Main files
+## What matters
 
-- `Simulation.py`: training, evaluation, checkpointing, and run logging.
-- `Algorithms/AGRPO.py`: main AGRPO implementation.
-- `Algorithms/CGRPO.py`: CGRPO population variant.
+- `Simulation.py`: main training and evaluation entry point.
+- `Algorithms/AGRPO.py` and `Algorithms/CGRPO.py`: final population-based methods.
 - `Algorithms/PPO.py`, `Algorithms/SAC.py`, `Algorithms/TD3.py`: baselines.
-- `utils.py`: environment wrappers, feature extraction, and buffers.
-- `logger.py`: run-folder creation and metric export.
-- `evaluate_runs.py`: plotting and comparison utilities.
+- `utils.py`, `logger.py`, `evaluate_runs.py`: support code for environments, logging, and plots.
+
+## Deliverables
+
+- `GRPO_Project.pdf`: final report.
+- `Simulation.py`, `utils.py`, `logger.py`, `evaluate_runs.py`, `Algorithms/*.py`: source code.
+- `requirements.txt` and `environment.yml`: environment definitions.
 
 ## Archived material
 
-- `archive/legacy/`: historical scripts and older AGRPO/CGRPO variants kept for reference, not for the main runnable path.
-
-## Final deliverables
-
-- `GRPO_Project.pdf`: final written report.
-- Source code: `Simulation.py`, `utils.py`, `logger.py`, `evaluate_runs.py`, and `Algorithms/*.py`.
-- Configuration: `requirements.txt` and `environment.yml`.
+- `archive/legacy/`: historical scripts and older AGRPO/CGRPO variants kept for reference only.
 
 ## Generated artifacts
 
-These are experiment outputs and stay out of the main source deliverable:
+These are experiment outputs and should stay out of the main source deliverable:
 
 - `checkpoints/`
 - `runs/`
@@ -39,12 +36,12 @@ These are experiment outputs and stay out of the main source deliverable:
 
 ## Reproducibility
 
-`Simulation.py` creates one run folder per env/algorithm/seed, saves `config.json`, copies the used source files, writes metrics to `metrics.csv`, and stores checkpoints under `checkpoints/`.
+`Simulation.py` creates one run folder per env/algorithm/seed, saves `config.json`, copies the source files used for that run, writes metrics to `metrics.csv`, and stores checkpoints under `checkpoints/`.
 
-`evaluate_runs.py` reads the saved metrics and generates plots after training.
+`evaluate_runs.py` turns saved metrics into plots after training.
 
 ## Maintenance notes
 
 - Keep `main` focused on the final runnable pipeline.
-- Historical files now live under `archive/legacy/` instead of the root path.
+- Historical files now live under `archive/legacy/`.
 - `Algorithms/` is an explicit Python package for cleaner imports and editor support.
